@@ -5,12 +5,8 @@ from src.intent_classifier import IntentClassifier
 from src.vector_store import VectorStoreManager
 from src.chatbot import CloudProductChatbot
 
-
 def main():
-    # ✅ 优化：基于当前文件(__file__)的绝对路径定位
-    # __file__ 指向当前文件 (main.py)
-    # dirname(__file__) 指向 src 目录
-    # dirname(dirname(__file__)) 指向项目根目录
+    # 优化：基于当前文件(__file__)的绝对路径定位
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     disease_dir = os.path.join(project_root, "data", "disease")
 
@@ -28,7 +24,7 @@ def main():
     doc_loader = DocumentLoader(data_dir=disease_dir)
     vector_manager = VectorStoreManager()
 
-    # ✅ 核心逻辑：先尝试加载
+    # 核心逻辑：先尝试加载
     vector_store = vector_manager.load_vector_store()
 
     if vector_store is None:
@@ -42,50 +38,47 @@ def main():
     else:
         print("✅ 成功加载现有向量库！")
 
-    # ✅ 初始化意图分类器
+    # 初始化意图分类器
     intent_classifier = IntentClassifier()
 
     chatbot = CloudProductChatbot(vector_store)
 
     print("\n" + "=" * 60)
-    print("🤖 医疗疾病咨询AI已启动 (已加载意图识别)")
+    print("🤖 医疗疾病咨询AI已启动 (已加载意图识别和多轮记忆)")
     print("💡 输入 'quit' 或 'exit' 退出")
     print("=" * 60)
+
+    # 为每个用户维护独立的session ID
+    current_session_id = "user_session_123"
 
     while True:
         print("\n📝 您: ", end="")
         user_input = input().strip()
         if user_input.lower() in ['quit', 'exit']:
+            print("👋 再见！感谢使用医疗咨询AI。")
             break
         if not user_input:
             continue
 
-        # ✅ 1. 意图识别
+        # 意图识别
         intent = intent_classifier.classify(user_input)
         print(f"\n🔍 识别意图: {intent}")
 
         try:
-            # ✅ 2. 根据意图分流处理
+            # 根据意图分流处理
             if intent == "medical_inquiry":
-                # ✅ 医疗意图：走 RAG 检索流程 (调用你原来的 ask_stream)
-                chatbot.ask_stream(user_input)
+                # ✅医疗意图：走RAG检索流程
+                chatbot.ask_stream(user_input, session_id=current_session_id)
             elif intent == "chat_general":
-                # ✅ 闲聊意图：不检索，直接让模型基于通用知识回答
-                print("💬 AI (通用模式): ", end="", flush=True)
-                # ✅ 这里可以写一个简化的流式输出，或者直接调用 LLM
-                # 为了演示，我们直接拼接一个回复
-                response = f"你好！我是医疗助手。你刚才的问候我收到了。关于医疗问题，随时可以问我哦。\n\n(检测到你正在闲聊，本次未进行知识库检索)"
-                for char in response:
-                    print(char, end="", flush=True)
-                    time.sleep(0.01)
+                # ✅闲聊意图：不检索，直接让模型基于通用知识回答
+                print("AI (通用模式): ", end="", flush=True)
+                chatbot.ask_stream(user_input, session_id=current_session_id)
             else:
-                # ✅ 未知意图或其他
-                print("💬 AI: ", end="", flush=True)
-                chatbot.ask_stream(user_input)  # 默认走主流程
+                # ✅未知意图或其他，默认走RAG流程
+                chatbot.ask_stream(user_input, session_id=current_session_id)
 
         except Exception as e:
             print(f"\n❌ 错误: {e}")
-
 
 if __name__ == "__main__":
     main()
