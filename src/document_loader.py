@@ -1,5 +1,6 @@
 import os
 from typing import List
+from .logger_config import logger
 from langchain_core.documents import Document
 
 
@@ -21,7 +22,7 @@ class DocumentLoader:
         documents = []
 
         # ✅ 关键：打印实际路径用于调试
-        print(f"🔍 正在加载文档目录: {self.data_dir}")
+        logger.info(f"🔍 正在加载文档目录: {self.data_dir}")
 
         if not os.path.exists(self.data_dir):
             raise FileNotFoundError(f"❌ 文档目录不存在！请检查路径：{self.data_dir}")
@@ -44,9 +45,9 @@ class DocumentLoader:
                             }
                         )
                         documents.append(doc)
-                        print(f"✅ 加载: {disease_name}")
+                        logger.info(f"✅ 加载: {disease_name}")
                 except Exception as e:
-                    print(f"⚠️ 跳过文件 {filename}: {e}")
+                    logger.info(f"📊 共加载 {len(documents)} 个疾病文档")
 
-        print(f"📊 共加载 {len(documents)} 个疾病文档")
+        logger.info(f"📊 共加载 {len(documents)} 个疾病文档")
         return documents

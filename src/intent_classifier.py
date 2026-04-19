@@ -1,5 +1,6 @@
-from langchain_ollama import OllamaLLM
 import json
+from langchain_ollama import OllamaLLM
+from src.logger_config import logger
 
 
 class IntentClassifier:
@@ -74,5 +75,5 @@ class IntentClassifier:
             else:
                 return "unknown"
         except Exception as e:
-            print(f"意图识别错误: {e}")
+            logger.info(f"意图识别错误: {e}")
             return "unknown"

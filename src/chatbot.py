@@ -6,7 +6,7 @@ from langchain_community.retrievers import BM25Retriever
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.messages import HumanMessage, AIMessage
-import time
+from src.logger_config import logger
 
 
 # 使用LangChain内置的消息历史管理
@@ -87,7 +87,7 @@ class CloudProductChatbot:
         )
 
     def ask_stream(self, question, session_id="default"):
-        print("💬 医疗顾问回复：", end="", flush=True)
+        logger.info("💬 医疗顾问回复：")
 
         inputs = {"input": question}
 
@@ -130,23 +130,23 @@ class CloudProductChatbot:
                     elif hasattr(content, '__iter__'):  # 如果是可迭代对象
                         yield str(content)
 
-            print("\n\n" + "=" * 50)
-            print("✅ 回答完毕")
+            logger.info("\n\n" + "=" * 50)
+            logger.info("✅ 回答完毕")
 
         except Exception as e:
-            print(f"\n❌ 流式输出失败: {e}")
+            logger.info(f"\n❌ 流式输出失败: {e}")
             # 备用方案：非流式输出
             try:
                 result = self.memory_chain.invoke(inputs, config={"configurable": {"session_id": session_id}})
                 answer = result.get('answer', result.get('output', result.get('result', '无结果')))
-                print(f"\n📝 最终回复: {answer}")
+                logger.info(f"\n📝 最终回复: {answer}")
 
                 # 保存AI的回答到历史记录
                 if session_id in store:
                     store[session_id].add_ai_message(answer)
 
             except Exception as fallback_error:
-                print(f"备用方案也失败: {fallback_error}")
+                logger.info(f"备用方案也失败: {fallback_error}")
 
     def get_answer(self, question, session_id="default"):
         """非流式获取答案的方法"""

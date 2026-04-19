@@ -1,6 +1,7 @@
+import os
+from .logger_config import logger
 from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaEmbeddings
-import os
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
@@ -22,7 +23,7 @@ class VectorStoreManager:
             length_function=len,
         )
         split_docs = text_splitter.split_documents(documents)
-        print(f"📊 分块数: {len(split_docs)}")
+        logger.info(f"📊 分块数: {len(split_docs)}")
 
         vector_store = FAISS.from_documents(split_docs, self.embeddings)
         # ✅ 保存时指定文件名
@@ -41,9 +42,9 @@ class VectorStoreManager:
                     index_name="index"  # ✅ 对应保存时的文件名
                 )
             else:
-                print("🆕 未检测到现有索引文件，将创建新的向量库。")
+                logger.info("🆕 未检测到现有索引文件，将创建新的向量库。")
                 return None
         except Exception as e:
-            print(f"⚠️ 加载向量库失败 (可能文件损坏或格式不匹配): {e}")
-            print("🆕 将重新创建向量库。")
+            logger.info(f"⚠️ 加载向量库失败 (可能文件损坏或格式不匹配): {e}")
+            logger.info("🆕 将重新创建向量库。")
             return None

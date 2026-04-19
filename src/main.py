@@ -1,13 +1,14 @@
 import os
 import time
 import argparse  # ✅ 新增：用于解析命令行参数
-from fastapi.responses import StreamingResponse
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel  # ✅ 新增：数据校验
 import uvicorn  # ✅ 新增：ASGI 服务器
+from pydantic import BaseModel  # ✅ 新增：数据校验
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from src.chatbot import CloudProductChatbot
 from src.document_loader import DocumentLoader
 from src.intent_classifier import IntentClassifier
+from src.logger_config import logger, monitor_performance
 from src.vector_store import VectorStoreManager
 
 # --- 全局变量：用于在 API 和 CLI 之间共享核心组件 ---
@@ -33,15 +34,15 @@ def initialize_system():
 
     store = vector_manager.load_vector_store()
     if store is None:
-        print("🔄 正在创建向量存储（首次运行或索引丢失）...")
+        logger.info("🔄 正在创建向量存储（首次运行或索引丢失）...")
         documents = doc_loader.load_documents()
         if not documents:
             raise Exception("❌ 没有加载到任何文档，无法初始化系统")
         vector_store = vector_manager.create_vector_store(documents)
-        print("✅ 向量存储创建完成！")
+        logger.info("✅ 向量存储创建完成！")
     else:
         vector_store = store
-        print("✅ 成功加载现有向量库！")
+        logger.info("✅ 成功加载现有向量库！")
 
     # 3. 初始化意图识别与聊天机器人
     intent_classifier = IntentClassifier()
@@ -68,9 +69,9 @@ def startup_event():
     """
     FastAPI 启动时自动运行
     """
-    print("🚀 正在初始化医疗AI系统...")
+    logger.info("🚀 正在初始化医疗AI系统...")
     initialize_system()
-    print("🎉 系统初始化完成，API 就绪！")
+    logger.info("🎉 系统初始化完成，API 就绪！")
 
 def generate_response_stream(query, history):
     # 示例：模拟逐个字符生成响应
@@ -177,6 +178,7 @@ async def api_chat_stream(request: ChatRequest):
     return StreamingResponse(generate_response(), media_type="text/event-stream")
 
 # --- 原有的 CLI 逻辑 ---
+@monitor_performance # ✅ 添加这一行，监控整个 CLI 循环的性能
 def run_cli():
     """
     原有的命令行交互逻辑
@@ -191,24 +193,24 @@ def run_cli():
 
     global intent_classifier, chatbot
 
-    print("\n" + "=" * 60)
-    print("🤖 医疗疾病咨询AI已启动 (CLI模式)")
-    print("💡 输入 'quit' 或 'exit' 退出")
-    print("=" * 60)
+    logger.info("\n" + "=" * 60)
+    logger.info("🤖 医疗疾病咨询AI已启动 (CLI模式)")
+    logger.info("💡 输入 'quit' 或 'exit' 退出")
+    logger.info("=" * 60)
 
     current_session_id = "user_session_123"
     while True:
-        print("\n📝 您: ", end="")
+        logger.info("\n📝 您: ")
         user_input = input().strip()
         if user_input.lower() in ['quit', 'exit']:
-            print("👋 再见！")
+            logger.info("👋 再见！")
             break
         if not user_input:
             continue
 
         # 意图识别
         intent = intent_classifier.classify(user_input)
-        print(f"\n🔍 识别意图: {intent}")
+        logger.info(f"\n🔍 识别意图: {intent}")
 
         try:
             # 根据意图分流处理
@@ -217,14 +219,14 @@ def run_cli():
                 chatbot.ask_stream(user_input, session_id=current_session_id)
             elif intent == "chat_general":
                 # ✅闲聊意图：不检索，直接让模型基于通用知识回答
-                print("AI (通用模式): ", end="", flush=True)
+                logger.info("AI (通用模式): ")
                 chatbot.ask_stream(user_input, session_id=current_session_id)
             else:
                 # ✅未知意图或其他，默认走RAG流程
                 chatbot.ask_stream(user_input, session_id=current_session_id)
 
         except Exception as e:
-            print(f"\n❌ 错误: {e}")
+            logger.info(f"\n❌ 错误: {e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="医疗咨询AI启动器")
