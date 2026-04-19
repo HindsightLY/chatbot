@@ -114,21 +114,21 @@ class CloudProductChatbot:
                         if key in chunk:
                             content = chunk[key]
                             break
+                elif hasattr(chunk, 'content'):
+                    content = chunk.content
+                else:
+                    content = str(chunk)
 
-                    if content:
-                        if isinstance(content, str):
-                            print(content, end="", flush=True)
-                            # 添加延迟效果
-                            if content in '，。！？；：,.!?;:':
-                                time.sleep(0.08)
-                            elif content == ' ':
-                                time.sleep(0.05)
-                            else:
-                                time.sleep(0.01)
-                        elif hasattr(content, '__iter__'):  # 如果是可迭代对象
-                            for item in content:
-                                print(str(item), end="", flush=True)
-                                time.sleep(0.01)
+                # 【关键改动】：逐字符 Yield
+                # 如果 content 是字符串，我们逐个字符输出以实现“打字机”效果
+                if content:
+                    if isinstance(content, str):
+                        for char in content:
+                            # 这里可以添加微小的延迟来模拟“打字”效果，也可以不加，由前端控制
+                            # time.sleep(0.01) # 可选：如果希望后端控制速度，取消注释
+                            yield char  # <-- 将字符发送给调用方
+                    elif hasattr(content, '__iter__'):  # 如果是可迭代对象
+                        yield str(content)
 
             print("\n\n" + "=" * 50)
             print("✅ 回答完毕")
