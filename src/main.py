@@ -2,13 +2,17 @@ import os
 import time
 import argparse  # ✅ 新增：用于解析命令行参数
 import uvicorn  # ✅ 新增：ASGI 服务器
+from langchain_core.prompts import PromptTemplate
+from langchain_ollama import OllamaLLM
 from pydantic import BaseModel  # ✅ 新增：数据校验
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from src.chatbot import CloudProductChatbot
 from src.document_loader import DocumentLoader
 from src.intent_classifier import IntentClassifier
+from src.juhe_news import get_daily_news, NewsResponse, NewsRequest
 from src.logger_config import logger, monitor_performance
+from src.tools import get_weather_info
 from src.vector_store import VectorStoreManager
 
 # --- 全局变量：用于在 API 和 CLI 之间共享核心组件 ---
@@ -60,6 +64,8 @@ class ChatResponse(BaseModel):
     answer: str
 
 
+
+
 # ✅ 新增：FastAPI 实例
 app = FastAPI(title="医疗咨询AI API", description="基于RAG的医疗问答接口")
 
@@ -80,11 +86,22 @@ def generate_response_stream(query, history):
         yield char
         time.sleep(0.05)  # 模拟延迟
 
+# 用于通用对话和整合外部信息的LLM实例
+general_llm = OllamaLLM(
+    model="qwen2.5:7b",
+    temperature=0.1, # 可根据需要调整
+    base_url="http://localhost:11434"
+)
+
+general_prompt_template = PromptTemplate.from_template(
+    "你是一个友好的AI助手。用户向你提问：{query}\n"
+    "根据你掌握的知识或提供的额外信息，回答用户的问题：\n"
+    "{additional_context}\n"
+    "请直接回答用户的问题，语言亲切自然。"
+)
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def api_chat(request: ChatRequest):
-    """
-    ✅ 核心 API 接口
-    """
     if not chatbot:
         raise HTTPException(status_code=500, detail="系统未初始化")
 
@@ -93,41 +110,119 @@ async def api_chat(request: ChatRequest):
 
     # 1. 意图识别
     intent = intent_classifier.classify(user_input)
+    logger.info(f"🔍 识别意图: {intent}")
 
-    # 2. 根据意图分流 (复用 CLI 的逻辑)
-    try:
+    # 2. 特殊关键词预处理（优先级最高）
+    lower_input = user_input.lower()
+    if any(keyword in lower_input for keyword in ['天气', 'weather', '气温', '温度']):
+        # 强制按 Agent 工具调用处理
+        result = chatbot.get_answer_with_tools(user_input, session_id)
+        answer = result
+    else:
+        # 3. 按原始意图处理
         if intent == "medical_inquiry":
-            # 医疗意图：走 RAG
-            # 注意：ask_stream 是打印流，这里我们需要获取完整文本
-            # 为了最小化修改，我们直接调用 chatbot 的底层逻辑或模拟获取
-            # 由于原 chatbot.ask_stream 直接 print，我们需要一个能返回字符串的方法
-            # 这里简单处理：直接调用 ask_stream 但捕获输出不太优雅，
-            # 建议 chatbot 增加一个 get_response 方法，但为了“最小化修改”，
-            # 我们假设 ask_stream 内部逻辑可以复用，或者我们在这里简单包装。
-
-            # 方案：为了不改 chatbot.py 太多，我们在这里简单模拟“获取回答”
-            # 实际上，最好是在 chatbot.py 中把生成逻辑提取出来。
-            # 但根据“最小化修改”原则，我们直接调用 ask_stream 并让它打印到控制台，
-            # 同时为了返回给前端，我们需要 chatbot 能返回字符串。
-
-            # ⚠️ 关键修改点：我们需要 chatbot 返回字符串而不是只打印
-            # 查看 chatbot.py，发现有一个 get_answer 方法！完美利用它。
-            result = chatbot.get_answer(user_input, session_id=session_id)
-            answer = result.get('answer', '抱歉，我没有找到相关信息。')
-
+            answer = chatbot.get_answer(user_input, session_id)
         elif intent == "chat_general":
-            # 闲聊意图
-            result = chatbot.get_answer(user_input, session_id=session_id)
-            answer = result.get('answer', '你好！')
+            formatted_prompt = general_prompt_template.format(query=user_input, additional_context="")
+            answer = general_llm.invoke(formatted_prompt)
+        elif intent == "system_query":
+            # 可以选择继续使用 Agent 或通用 LLM
+            answer = chatbot.get_answer_with_tools(user_input, session_id)
         else:
-            # 未知意图
-            result = chatbot.get_answer(user_input, session_id=session_id)
-            answer = result.get('answer', '我不太明白你的意思。')
+            answer = chatbot.get_answer(user_input, session_id)
+
+    return ChatResponse(intent=intent, answer=answer)
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def api_chat(request: ChatRequest):
+    if not chatbot:
+        raise HTTPException(status_code=500, detail="系统未初始化")
+
+    user_input = request.query
+    session_id = request.session_id # 已经从请求中获取了 session_id
+
+    try:
+        # 1. 意图识别
+        intent = intent_classifier.classify(user_input)
+        logger.info(f"🔍 识别意图: {intent}")
+
+        # 2. 关键词预处理（覆盖意图分类结果）
+        lower_input = user_input.lower()
+        is_weather_query = any(keyword in lower_input for keyword in ['天气', 'weather', '气温', '温度'])
+
+        if is_weather_query:
+            # 强制按天气查询处理，不管意图分类结果是什么
+            import re
+            city_match = re.search(r'([A-Za-z\u4e00-\u9fa5]+)[天天气气温度]', lower_input)
+            if city_match:
+                city = city_match.group(1)
+                logger.info(f"Detected city: {city}")
+                weather_data = get_weather_info(city)
+                # 使用通用 LLM 生成回复，而非 RAG
+                formatted_prompt = general_prompt_template.format(
+                    query=user_input,
+                    additional_context=weather_data
+                )
+                answer = general_llm.invoke(formatted_prompt)
+            else:
+                # 没有提取到城市，返回提示
+                answer = "请告诉我具体的城市名称，例如'北京天气'或'上海今天气温'"
+        else:
+            # 按原始意图处理
+            if intent == "medical_inquiry":
+                # 医疗意图：走 RAG
+                result = chatbot.get_answer(user_input, session_id)
+                answer = result.get('answer', '抱歉，我没有找到相关信息。')
+
+            elif intent == "chat_general":
+                # 闲聊意图：使用通用 LLM
+                formatted_prompt = general_prompt_template.format(
+                    query=user_input,
+                    additional_context=""
+                )
+                answer = general_llm.invoke(formatted_prompt)
+
+            elif intent == "system_query":
+                # 系统查询意图：也可以走通用 LLM，或根据具体内容判断
+                # 这里可以加入更多关键词判断，决定是否走天气查询
+                if is_weather_query:  # 双重保险
+                    # 同上，处理天气查询
+                    import re
+                    city_match = re.search(r'([A-Za-z\u4e00-\u9fa5]+)[今天天气温度]', lower_input)
+                    if city_match:
+                        city = city_match.group(1)
+                        logger.info(f"Detected city: {city}")
+                        weather_data = get_weather_info(city)
+                        formatted_prompt = general_prompt_template.format(
+                            query=user_input,
+                            additional_context=weather_data
+                        )
+                        answer = general_llm.invoke(formatted_prompt)
+                    else:
+                        # 无法提取城市，走通用闲聊
+                        formatted_prompt = general_prompt_template.format(
+                            query=user_input,
+                            additional_context=""
+                        )
+                        answer = general_llm.invoke(formatted_prompt)
+                else:
+                    # 其他系统查询，走通用 LLM
+                    formatted_prompt = general_prompt_template.format(
+                        query=user_input,
+                        additional_context=""
+                    )
+                    answer = general_llm.invoke(formatted_prompt)
+
+            else:
+                # 未知意图
+                result = chatbot.get_answer(user_input, session_id)
+                answer = result.get('answer', '我不太明白你的意思。')
 
         return ChatResponse(intent=intent, answer=answer)
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"API处理错误: {e}")
+        raise HTTPException(status_code=500, detail=f"处理请求时发生错误: {str(e)}")
 
 
 @app.post("/api/chat/stream")
@@ -176,6 +271,47 @@ async def api_chat_stream(request: ChatRequest):
             yield f"Error: {str(e)}"
 
     return StreamingResponse(generate_response(), media_type="text/event-stream")
+
+
+# ✅ 新增：每日新闻接口
+@app.post("/api/chat/daily_news", response_model=NewsResponse)
+async def daily_news(request: NewsRequest = None):
+    """
+    获取每日新闻接口
+    """
+    if request is None:
+        request = NewsRequest()
+
+    news_type = request.news_type
+
+    # 验证新闻类型
+    valid_types = ["top", "shehui", "guonei", "guoji", "yule", "tiyu", "junshi", "keji", "caijing", "shishang"]
+    if news_type not in valid_types:
+        news_type = "top"  # 默认为top
+
+    try:
+        # 获取新闻数据
+        news_result = get_daily_news(news_type)
+
+        if news_result["success"]:
+            return NewsResponse(
+                success=True,
+                news=news_result["news"],
+                total=news_result["total"]
+            )
+        else:
+            return NewsResponse(
+                success=False,
+                error=news_result.get("reason", "获取新闻失败")
+            )
+
+    except Exception as e:
+        logger.error(f"获取新闻时发生错误: {e}")
+        return NewsResponse(
+            success=False,
+            error=f"获取新闻时发生错误: {str(e)}"
+        )
+
 
 # --- 原有的 CLI 逻辑 ---
 @monitor_performance # ✅ 添加这一行，监控整个 CLI 循环的性能
@@ -234,7 +370,7 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0", help="API 监听地址")
     parser.add_argument("--port", type=int, default=8000, help="API 监听端口")
 
-    args = parser.parse_args()
+    args = parser.parse_args(['--api'])
 
     if args.api:
         # ✅ 启动 API 模式
@@ -244,3 +380,4 @@ if __name__ == "__main__":
     else:
         # ✅ 启动 CLI 模式 (默认)
         run_cli()
+

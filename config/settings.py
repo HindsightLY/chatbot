@@ -18,3 +18,6 @@ LLM_MODEL = "qwen2.5:7b"
 TOP_K = 4
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
+
+AMAP_API_KEY = "442835220e8faecaf0dc626b52e3f143"
+AMAP_WEATHER_URL = "https://restapi.amap.com/v3/weather/weatherInfo"
