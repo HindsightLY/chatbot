@@ -5,7 +5,7 @@
 import json
 import os
 from urllib import parse, request
-from .logger_config import logger
+from src.logger_config import logger
 from pydantic import BaseModel
 
 # https://www.juhe.cn/docs/api/id/235

@@ -2,14 +2,13 @@
 系统初始化服务
 负责系统的整体初始化逻辑
 """
-import os
-from typing import Tuple, Optional
+from typing import Tuple
+from src.logger_config import logger
 from config.app_config import APP_CONFIG
 from src.document_loader import DocumentLoader
 from src.vector_store import VectorStoreManager
 from src.intent_classifier import IntentClassifier
 from src.chatbot import MedicalChatbot
-from src.logger_config import logger
 
 
 class SystemInitializer:
@@ -35,6 +34,10 @@ class SystemInitializer:
             Exception: 初始化失败时抛出异常
         """
         logger.info("🔄 开始初始化医疗AI系统...")
+        logger.info(f"📁 项目根目录: {APP_CONFIG.project_root}")
+        logger.info(f"📁 数据目录: {APP_CONFIG.data_dir}")
+        logger.info(f"📁 疾病文档目录: {APP_CONFIG.disease_dir}")
+        logger.info(f"📁 向量索引目录: {APP_CONFIG.vector_persist_dir}")
 
         # 1. 初始化向量存储
         self.vector_store = self._initialize_vector_store()
@@ -58,17 +61,25 @@ class SystemInitializer:
         """
         logger.info("📦 初始化向量存储...")
 
-        doc_loader = DocumentLoader(data_dir=APP_CONFIG.disease_dir)
-        vector_manager = VectorStoreManager(persist_dir=APP_CONFIG.vector_persist_dir)
+        # 创建向量存储管理器
+        vector_manager = VectorStoreManager()
 
+        # 尝试加载现有向量库
         store = vector_manager.load_vector_store()
+
         if store is None:
-            logger.info("🔄 正在创建向量存储（首次运行或索引丢失）...")
-            documents = doc_loader.load_documents()
+            logger.info("🔄 未找到现有向量库，正在创建新的向量存储...")
+
+            # 加载文档
+            doc_loader = DocumentLoader()
+            documents = doc_loader.load_and_split_documents()
+
             if not documents:
-                raise Exception("❌ 没有加载到任何文档，无法初始化系统")
+                raise Exception("❌ 没有加载到任何文档，无法初始化向量存储")
+
+            # 创建新的向量库
             store = vector_manager.create_vector_store(documents)
-            logger.info("✅ 向量存储创建完成！")
+            logger.info("✅ 新向量存储创建完成！")
         else:
             logger.info("✅ 成功加载现有向量库！")
 

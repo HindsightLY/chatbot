@@ -7,7 +7,7 @@ from typing import Optional
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
 from config.app_config import APP_CONFIG
-from src.tools import get_weather_info
+from src.tools.weather_tool import get_weather_info
 from src.logger_config import logger
 
 

@@ -154,7 +154,7 @@ class MedicalChatbot:
         Returns:
             str: 工具辅助生成的回答
         """
-        from .tools import get_current_weather, get_current_time
+        from src.tools.weather_tool import get_current_weather, get_current_time
 
         # 定义常见城市列表（可扩展）
         common_cities = [

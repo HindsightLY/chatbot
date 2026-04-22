@@ -5,7 +5,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from config.app_config import APP_CONFIG
-from src.juhe_news import get_daily_news, NewsResponse, NewsRequest
+from src.tools.news_tool import get_daily_news, NewsResponse, NewsRequest
 from src.logger_config import logger
 from src.service.system_initializer import system_initializer
 from src.service.tool_manager import tool_manager

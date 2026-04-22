@@ -10,12 +10,13 @@ class AppConfig(BaseModel):
     """
     应用配置类
     """
-    # 项目路径配置
+    # 项目根目录 - 从配置文件位置向上两级
     project_root: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    disease_dir: str = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "disease")
 
-    # 向量存储配置
-    vector_persist_dir: str = "faiss_index"
+    # 数据目录配置
+    data_dir: str = os.path.join(project_root, "data")
+    disease_dir: str = os.path.join(data_dir, "disease")
+    vector_persist_dir: str = os.path.join(data_dir, "faiss_index")
 
     # LLM模型配置
     llm_model_name: str = "qwen2.5:7b"
@@ -53,9 +54,33 @@ class AppConfig(BaseModel):
         "caijing", "shishang"
     ]
 
+    def ensure_data_dirs(self):
+        """
+        确保数据目录存在，如果不存在则创建
+        """
+        import os
+
+        # 确保data目录存在
+        if not os.path.exists(self.data_dir):
+            os.makedirs(self.data_dir)
+            print(f"✅ 创建数据目录: {self.data_dir}")
+
+        # 确保disease目录存在
+        if not os.path.exists(self.disease_dir):
+            os.makedirs(self.disease_dir)
+            print(f"✅ 创建疾病文档目录: {self.disease_dir}")
+
+        # 确保faiss_index目录存在
+        if not os.path.exists(self.vector_persist_dir):
+            os.makedirs(self.vector_persist_dir)
+            print(f"✅ 创建向量索引目录: {self.vector_persist_dir}")
+
 
 # 全局配置实例
 APP_CONFIG = AppConfig()
+
+# 确保数据目录存在
+APP_CONFIG.ensure_data_dirs()
 
 
 def get_app_config() -> AppConfig:

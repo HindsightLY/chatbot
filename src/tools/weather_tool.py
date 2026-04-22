@@ -5,7 +5,7 @@
 from config.settings import AMAP_WEATHER_URL, AMAP_API_KEY
 import requests
 from datetime import datetime
-from .logger_config import logger
+from src.logger_config import logger
 
 
 def get_current_weather(location, unit="celsius"):
