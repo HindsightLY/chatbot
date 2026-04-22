@@ -1,30 +1,38 @@
+"""
+聊天机器人模块
+提供基于RAG的医疗咨询功能
+"""
 import re
-
-from langchain_classic.agents import create_react_agent, AgentExecutor
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_classic.chains.retrieval import create_retrieval_chain
-from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
+from langchain_core.prompts import PromptTemplate
 from langchain_ollama import OllamaLLM
-from langchain_community.retrievers import BM25Retriever
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.messages import HumanMessage, AIMessage
-from src.logger_config import logger
+from .logger_config import logger
 
 
-# 使用LangChain内置的消息历史管理
 class InMemoryChatMessageHistory(BaseChatMessageHistory):
+    """
+    内存聊天历史记录类
+    用于存储单个会话的聊天历史
+    """
+
     def __init__(self):
         super().__init__()
         self.messages = []
 
     def add_user_message(self, message: str):
+        """添加用户消息"""
         self.messages.append(HumanMessage(content=message))
 
     def add_ai_message(self, message: str):
+        """添加AI消息"""
         self.messages.append(AIMessage(content=message))
 
     def clear(self):
+        """清空历史记录"""
         self.messages = []
 
 
@@ -32,8 +40,19 @@ class InMemoryChatMessageHistory(BaseChatMessageHistory):
 store = {}
 
 
-class CloudProductChatbot:
+class MedicalChatbot:
+    """
+    医疗聊天机器人
+    基于RAG技术提供医疗咨询服务
+    """
+
     def __init__(self, vector_store):
+        """
+        初始化医疗聊天机器人
+
+        Args:
+            vector_store: 向量存储实例
+        """
         self.vector_store = vector_store
 
         # 使用Ollama LLM
@@ -89,25 +108,53 @@ class CloudProductChatbot:
             history_messages_key="chat_history"  # 注意这里的键名需要和PromptTemplate中的一致
         )
 
-    def _create_agent(self):
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", "你是一个智能助手，可以根据用户的需求调用工具获取信息。"),
-            ("human", "{input}"),
-            ("ai", "{agent_scratchpad}")
-        ])
+    def _extract_city_from_input(self, input_text: str, common_cities: list) -> str:
+        """
+        从输入文本中提取城市名
 
-        agent = create_react_agent(self.llm, self.tools, prompt)
-        return AgentExecutor(agent=agent, tools=self.tools)
+        Args:
+            input_text: 输入文本
+            common_cities: 常见城市列表
 
-    def get_answer(self, query):
-        result = self.agent_executor.invoke({"input": query})
-        return result["output"]
+        Returns:
+            str: 提取出的城市名，如果未找到则返回None
+        """
+        # 方法1：直接匹配城市列表
+        for city in common_cities:
+            if city in input_text:
+                return city
+
+        # 方法2：尝试匹配"在XX"、"去XX"、"XX的"等模式
+        patterns = [
+            r'在([^\s，。？！,\.!?]+?)[的\s]',  # 匹配"在XX的"
+            r'去([^\s，。？！,\.!?]+?)[的\s]',  # 匹配"去XX的"
+            r'([^\s，。？！,\.!?]+?)的天气',  # 匹配"XX的天气"
+            r'([^\s，。？！,\.!?]+?)天气',  # 匹配"XX天气"
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, input_text)
+            if match:
+                potential_city = match.group(1)
+                # 检查是否是常见城市之一
+                for city in common_cities:
+                    if city in potential_city or potential_city in city:
+                        return city
+
+        return None
 
     def get_answer_with_tools(self, user_input: str, session_id: str):
         """
-        使用工具（如天气、时间）辅助生成回答，并用NLP提取地点城市
+        使用工具（如天气、时间）辅助生成回答
+
+        Args:
+            user_input: 用户输入
+            session_id: 会话ID
+
+        Returns:
+            str: 工具辅助生成的回答
         """
-        from src.tools import get_current_weather, get_current_time
+        from .tools import get_current_weather, get_current_time
 
         # 定义常见城市列表（可扩展）
         common_cities = [
@@ -135,35 +182,17 @@ class CloudProductChatbot:
         # 否则走默认 LLM 回答
         return self.get_answer(user_input, session_id)
 
-    def _extract_city_from_input(self, input_text: str, common_cities: list) -> str:
-        """
-        从输入文本中提取城市名
-        """
-        # 方法1：直接匹配城市列表
-        for city in common_cities:
-            if city in input_text:
-                return city
-
-        # 方法2：尝试匹配"在XX"、"去XX"、"XX的"等模式
-        patterns = [
-            r'在([^\s，。？！,\.!?]+?)[的\s]',  # 匹配"在XX的"
-            r'去([^\s，。？！,\.!?]+?)[的\s]',  # 匹配"去XX的"
-            r'([^\s，。？！,\.!?]+?)的天气',  # 匹配"XX的天气"
-            r'([^\s，。？！,\.!?]+?)天气',  # 匹配"XX天气"
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, input_text)
-            if match:
-                potential_city = match.group(1)
-                # 检查是否是常见城市之一
-                for city in common_cities:
-                    if city in potential_city or potential_city in city:
-                        return city
-
-        return None
-
     def ask_stream(self, question, session_id="default"):
+        """
+        流式回答，逐字符输出
+
+        Args:
+            question: 问题
+            session_id: 会话ID
+
+        Yields:
+            str: 逐字符的响应内容
+        """
         logger.info("💬 医疗顾问回复：")
 
         inputs = {"input": question}
@@ -197,11 +226,11 @@ class CloudProductChatbot:
                     content = str(chunk)
 
                 # 【关键改动】：逐字符 Yield
-                # 如果 content 是字符串，我们逐个字符输出以实现“打字机”效果
+                # 如果 content 是字符串，我们逐个字符输出以实现"打字机"效果
                 if content:
                     if isinstance(content, str):
                         for char in content:
-                            # 这里可以添加微小的延迟来模拟“打字”效果，也可以不加，由前端控制
+                            # 这里可以添加微小的延迟来模拟"打字"效果，也可以不加，由前端控制
                             # time.sleep(0.01) # 可选：如果希望后端控制速度，取消注释
                             yield char  # <-- 将字符发送给调用方
                     elif hasattr(content, '__iter__'):  # 如果是可迭代对象
@@ -226,7 +255,16 @@ class CloudProductChatbot:
                 logger.info(f"备用方案也失败: {fallback_error}")
 
     def get_answer(self, question, session_id="default"):
-        """非流式获取答案的方法"""
+        """
+        非流式获取答案的方法
+
+        Args:
+            question: 问题
+            session_id: 会话ID
+
+        Returns:
+            dict: 包含答案的字典
+        """
         inputs = {"input": question}
         result = self.memory_chain.invoke(inputs, config={"configurable": {"session_id": session_id}})
 

@@ -1,13 +1,17 @@
+"""
+主应用模块
+提供API服务和命令行界面
+"""
 import os
 import time
-import argparse  # ✅ 新增：用于解析命令行参数
-import uvicorn  # ✅ 新增：ASGI 服务器
+import argparse  # 新增：用于解析命令行参数
+import uvicorn  # 新增：ASGI 服务器
 from langchain_core.prompts import PromptTemplate
 from langchain_ollama import OllamaLLM
-from pydantic import BaseModel  # ✅ 新增：数据校验
+from pydantic import BaseModel  # 新增：数据校验
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from src.chatbot import CloudProductChatbot
+from src.chatbot import MedicalChatbot
 from src.document_loader import DocumentLoader
 from src.intent_classifier import IntentClassifier
 from src.juhe_news import get_daily_news, NewsResponse, NewsRequest
@@ -15,7 +19,7 @@ from src.logger_config import logger, monitor_performance
 from src.tools import get_weather_info
 from src.vector_store import VectorStoreManager
 
-# --- 全局变量：用于在 API 和 CLI 之间共享核心组件 ---
+# 全局变量：用于在 API 和 CLI 之间共享核心组件
 vector_store = None
 intent_classifier = None
 chatbot = None
@@ -23,7 +27,7 @@ chatbot = None
 
 def initialize_system():
     """
-    ✅ 提取公共初始化逻辑
+    提取公共初始化逻辑
     无论是 CLI 还是 API，都需要先加载向量和模型
     """
     global vector_store, intent_classifier, chatbot
@@ -50,23 +54,23 @@ def initialize_system():
 
     # 3. 初始化意图识别与聊天机器人
     intent_classifier = IntentClassifier()
-    chatbot = CloudProductChatbot(vector_store)
+    chatbot = MedicalChatbot(vector_store)
 
 
-# ✅ 新增：API 请求的数据模型
+# 新增：API 请求的数据模型
 class ChatRequest(BaseModel):
+    """聊天请求数据模型"""
     query: str
     session_id: str = "default_user"  # 前端可以传入 session_id 来维持多轮对话
 
 
 class ChatResponse(BaseModel):
+    """聊天响应数据模型"""
     intent: str
     answer: str
 
 
-
-
-# ✅ 新增：FastAPI 实例
+# 新增：FastAPI 实例
 app = FastAPI(title="医疗咨询AI API", description="基于RAG的医疗问答接口")
 
 
@@ -79,6 +83,7 @@ def startup_event():
     initialize_system()
     logger.info("🎉 系统初始化完成，API 就绪！")
 
+
 def generate_response_stream(query, history):
     # 示例：模拟逐个字符生成响应
     response = "这是一个模拟的流式响应。"
@@ -86,10 +91,11 @@ def generate_response_stream(query, history):
         yield char
         time.sleep(0.05)  # 模拟延迟
 
+
 # 用于通用对话和整合外部信息的LLM实例
 general_llm = OllamaLLM(
     model="qwen2.5:7b",
-    temperature=0.1, # 可根据需要调整
+    temperature=0.1,  # 可根据需要调整
     base_url="http://localhost:11434"
 )
 
@@ -100,46 +106,23 @@ general_prompt_template = PromptTemplate.from_template(
     "请直接回答用户的问题，语言亲切自然。"
 )
 
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def api_chat(request: ChatRequest):
+    """
+    聊天API接口
+
+    Args:
+        request: 聊天请求
+
+    Returns:
+        ChatResponse: 聊天响应
+    """
     if not chatbot:
         raise HTTPException(status_code=500, detail="系统未初始化")
 
     user_input = request.query
     session_id = request.session_id
-
-    # 1. 意图识别
-    intent = intent_classifier.classify(user_input)
-    logger.info(f"🔍 识别意图: {intent}")
-
-    # 2. 特殊关键词预处理（优先级最高）
-    lower_input = user_input.lower()
-    if any(keyword in lower_input for keyword in ['天气', 'weather', '气温', '温度']):
-        # 强制按 Agent 工具调用处理
-        result = chatbot.get_answer_with_tools(user_input, session_id)
-        answer = result
-    else:
-        # 3. 按原始意图处理
-        if intent == "medical_inquiry":
-            answer = chatbot.get_answer(user_input, session_id)
-        elif intent == "chat_general":
-            formatted_prompt = general_prompt_template.format(query=user_input, additional_context="")
-            answer = general_llm.invoke(formatted_prompt)
-        elif intent == "system_query":
-            # 可以选择继续使用 Agent 或通用 LLM
-            answer = chatbot.get_answer_with_tools(user_input, session_id)
-        else:
-            answer = chatbot.get_answer(user_input, session_id)
-
-    return ChatResponse(intent=intent, answer=answer)
-
-@app.post("/api/chat", response_model=ChatResponse)
-async def api_chat(request: ChatRequest):
-    if not chatbot:
-        raise HTTPException(status_code=500, detail="系统未初始化")
-
-    user_input = request.query
-    session_id = request.session_id # 已经从请求中获取了 session_id
 
     try:
         # 1. 意图识别
@@ -228,7 +211,13 @@ async def api_chat(request: ChatRequest):
 @app.post("/api/chat/stream")
 async def api_chat_stream(request: ChatRequest):
     """
-    新增流式接口
+    流式聊天API接口
+
+    Args:
+        request: 聊天请求
+
+    Returns:
+        StreamingResponse: 流式响应
     """
     if not chatbot:
         raise HTTPException(status_code=500, detail="系统未初始化")
@@ -242,8 +231,7 @@ async def api_chat_stream(request: ChatRequest):
     intent = intent_classifier.classify(user_input)
 
     # 我们将意图放在 SSE 的第一个消息里，或者作为元数据
-    # 这里为了简单，我们直接在流开始时发送一个包含意图的JSON，然后是文本流
-    # 但为了最简改动，我们只流式传输文本，前端通过其他方式获取意图
+    # 这里为了简单，我们只流式传输文本，前端通过其他方式获取意图
     # 或者：我们构建一个生成器，先生成意图，再生成文本
 
     async def generate_response():
@@ -273,11 +261,17 @@ async def api_chat_stream(request: ChatRequest):
     return StreamingResponse(generate_response(), media_type="text/event-stream")
 
 
-# ✅ 新增：每日新闻接口
+# 新增：每日新闻接口
 @app.post("/api/chat/daily_news", response_model=NewsResponse)
 async def daily_news(request: NewsRequest = None):
     """
-    获取每日新闻接口
+    每日新闻API接口
+
+    Args:
+        request: 新闻请求，如果为None则使用默认值
+
+    Returns:
+        NewsResponse: 新闻响应
     """
     if request is None:
         request = NewsRequest()
@@ -313,11 +307,11 @@ async def daily_news(request: NewsRequest = None):
         )
 
 
-# --- 原有的 CLI 逻辑 ---
-@monitor_performance # ✅ 添加这一行，监控整个 CLI 循环的性能
+# 原有的 CLI 逻辑
+@monitor_performance  # 添加这一行，监控整个 CLI 循环的性能
 def run_cli():
     """
-    原有的命令行交互逻辑
+    命令行交互逻辑
     """
     # 注意：initialize_system 已经初始化了全局变量，
     # 但为了保持原有逻辑独立（如果用户直接运行旧代码），这里可以保留部分逻辑
@@ -351,18 +345,19 @@ def run_cli():
         try:
             # 根据意图分流处理
             if intent == "medical_inquiry":
-                # ✅医疗意图：走RAG检索流程
+                # 医疗意图：走RAG检索流程
                 chatbot.ask_stream(user_input, session_id=current_session_id)
             elif intent == "chat_general":
-                # ✅闲聊意图：不检索，直接让模型基于通用知识回答
+                # 闲聊意图：不检索，直接让模型基于通用知识回答
                 logger.info("AI (通用模式): ")
                 chatbot.ask_stream(user_input, session_id=current_session_id)
             else:
-                # ✅未知意图或其他，默认走RAG流程
+                # 未知意图或其他，默认走RAG流程
                 chatbot.ask_stream(user_input, session_id=current_session_id)
 
         except Exception as e:
             logger.info(f"\n❌ 错误: {e}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="医疗咨询AI启动器")
@@ -373,11 +368,10 @@ if __name__ == "__main__":
     args = parser.parse_args(['--api'])
 
     if args.api:
-        # ✅ 启动 API 模式
+        # 启动 API 模式
         # 注意：initialize_system 会在 on_event("startup") 中调用
         # 这里直接启动 uvicorn
-        uvicorn.run("src.main:app", host=args.host, port=args.port, reload=False)
+        uvicorn.run(app, host=args.host, port=args.port, reload=False)
     else:
-        # ✅ 启动 CLI 模式 (默认)
+        # 启动 CLI 模式 (默认)
         run_cli()
-

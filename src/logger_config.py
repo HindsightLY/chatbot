@@ -1,3 +1,7 @@
+"""
+日志配置模块
+提供统一的日志记录功能和性能监控装饰器
+"""
 import sys
 import time
 import logging
@@ -6,6 +10,12 @@ from logging import StreamHandler, Formatter
 
 
 def setup_logger():
+    """
+    设置日志记录器
+
+    Returns:
+        logging.Logger: 配置好的日志记录器
+    """
     # 创建一个格式器
     formatter = Formatter(
         fmt='%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
@@ -30,8 +40,19 @@ def setup_logger():
 # 全局实例
 logger = setup_logger()
 
+
 def monitor_performance(func):
-    """一个简单的性能监控装饰器"""
+    """
+    性能监控装饰器
+    记录函数执行时间并捕获异常
+
+    Args:
+        func: 被装饰的函数
+
+    Returns:
+        装饰后的函数
+    """
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         start_time = time.time()
@@ -45,4 +66,5 @@ def monitor_performance(func):
             duration = time.time() - start_time
             logger.error(f"💥 异常退出: {func.__name__} | 耗时: {duration:.2f}s | 错误: {e}")
             raise
+
     return wrapper

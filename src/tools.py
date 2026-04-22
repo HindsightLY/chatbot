@@ -1,50 +1,34 @@
+"""
+工具模块
+提供各种实用工具，如天气查询、时间获取等
+"""
 from config.settings import AMAP_WEATHER_URL, AMAP_API_KEY
 import requests
 from datetime import datetime
-from src.logger_config import logger
-
-
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_current_weather",
-            "description": "获取指定地点的天气情况",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "城市名称，例如 北京, 上海",
-                    },
-                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
-                },
-                "required": ["location"],
-            },
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_current_time",
-            "description": "获取当前时间",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
-        }
-    }
-]
+from .logger_config import logger
 
 
 def get_current_weather(location, unit="celsius"):
-    """这是一个模拟函数，实际项目中这里会调用真实的天气API"""
-    # return f"{location} 当前的天气是晴天，气温 25 摄氏度。"
+    """
+    获取指定地点的天气情况
+
+    Args:
+        location: 地点名称
+        unit: 温度单位，默认摄氏度
+
+    Returns:
+        str: 天气信息
+    """
     return search_weather(city=location)
 
 
 def get_current_time():
-    """获取当前时间"""
+    """
+    获取当前时间
+
+    Returns:
+        str: 格式化的时间字符串
+    """
     now = datetime.now()
     return f"当前时间是 {now.strftime('%Y年%m月%d日 %H:%M:%S')}，星期{now.strftime('%A')[:2]}"
 
@@ -52,17 +36,21 @@ def get_current_time():
 def search_weather(city: str):
     """
     调用高德天气API获取天气信息
-    :param city: 城市名称
-    :return: 天气信息字符串或错误信息
+
+    Args:
+        city: 城市名称
+
+    Returns:
+        str: 天气信息字符串或错误信息
     """
     params = {
         'key': AMAP_API_KEY,
         'city': city,
-        'extensions': 'base' # 获取基本天气信息
+        'extensions': 'base'  # 获取基本天气信息
     }
     try:
         response = requests.get(AMAP_WEATHER_URL, params=params)
-        response.raise_for_status() # 检查HTTP错误
+        response.raise_for_status()  # 检查HTTP错误
         data = response.json()
 
         if data.get('status') == '1':
@@ -94,7 +82,45 @@ def search_weather(city: str):
 def get_weather_info(city: str):
     """
     获取天气信息的函数，供main.py调用
-    :param city: 城市名称
-    :return: 天气信息字符串
+
+    Args:
+        city: 城市名称
+
+    Returns:
+        str: 天气信息字符串
     """
     return search_weather(city)
+
+
+# 定义工具描述，供Agent使用
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_weather",
+            "description": "获取指定地点的天气情况",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "城市名称，例如 北京, 上海",
+                    },
+                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+                },
+                "required": ["location"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_time",
+            "description": "获取当前时间",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        }
+    }
+]

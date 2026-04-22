@@ -1,16 +1,26 @@
-# src/juhe_news.py
+"""
+聚合新闻客户端模块
+提供新闻获取功能
+"""
 import json
 import os
 from urllib import parse, request
-from src.logger_config import logger
+from .logger_config import logger
 from pydantic import BaseModel
 
 # https://www.juhe.cn/docs/api/id/235
 class JuHeNewsClient:
+    """
+    聚合新闻客户端
+    用于获取各类新闻信息
+    """
+
     def __init__(self, api_key=None):
         """
         初始化聚合新闻客户端
-        :param api_key: 聚合数据API密钥，如果不提供则从环境变量获取
+
+        Args:
+            api_key: 聚合数据API密钥，如果不提供则从环境变量获取
         """
         self.url = 'http://v.juhe.cn/toutiao/index'
         self.api_key = api_key or os.getenv('JUHE_NEWS_API_KEY', 'eedeb472d6177bfecb950f01febf4884')
@@ -18,11 +28,15 @@ class JuHeNewsClient:
     def get_daily_news(self, news_type="top"):
         """
         获取每日新闻
-        :param news_type: 新闻类型，默认为"top"(头条)
-                           可选值：top(头条),shehui(社会),guonei(国内),guoji(国际),
-                                 yule(娱乐),tiyu(体育),junshi(军事),keji(科技),
-                                 caijing(财经),shishang(时尚)
-        :return: 新闻数据或错误信息
+
+        Args:
+            news_type: 新闻类型，默认为"top"(头条)
+                      可选值：top(头条),shehui(社会),guonei(国内),guoji(国际),
+                            yule(娱乐),tiyu(体育),junshi(军事),keji(科技),
+                            caijing(财经),shishang(时尚)
+
+        Returns:
+            dict: 新闻数据或错误信息
         """
         params = {
             "type": news_type,
@@ -87,18 +101,25 @@ class JuHeNewsClient:
 def get_daily_news(news_type="top"):
     """
     便捷获取每日新闻的函数
-    :param news_type: 新闻类型
-    :return: 新闻数据
+
+    Args:
+        news_type: 新闻类型
+
+    Returns:
+        dict: 新闻数据
     """
     client = JuHeNewsClient()
     return client.get_daily_news(news_type)
 
-# ✅ 新增：新闻请求的数据模型
+
+# 新增：新闻请求的数据模型
 class NewsRequest(BaseModel):
+    """新闻请求数据模型"""
     news_type: str = "top"  # 默认获取头条新闻
 
 
 class NewsResponse(BaseModel):
+    """新闻响应数据模型"""
     success: bool
     news: list = []
     total: int = 0
