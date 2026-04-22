@@ -106,6 +106,28 @@ general_prompt_template = PromptTemplate.from_template(
     "请直接回答用户的问题，语言亲切自然。"
 )
 
+def extract_city_with_llm(query: str) -> str:
+    """
+    使用大模型从用户查询中提取城市名
+    """
+    extraction_prompt = f"""
+    请从以下句子中提取出城市名称。只返回城市名称，不要有任何其他文字。
+    如果句子中没有提及具体城市，则返回"未找到"。
+
+    句子: {query}
+
+    城市名称:
+    """
+    try:
+        city_name = general_llm.invoke(extraction_prompt).strip()
+        # 过滤无效结果
+        invalid_results = ["未找到", "没有", "", "无法", "不知道", "不清楚"]
+        if city_name in invalid_results or len(city_name) < 2 or len(city_name) > 10:
+            return None
+        return city_name
+    except Exception as e:
+        logger.error(f"LLM提取城市失败: {e}")
+        return None
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def api_chat(request: ChatRequest):
@@ -129,35 +151,43 @@ async def api_chat(request: ChatRequest):
         intent = intent_classifier.classify(user_input)
         logger.info(f"🔍 识别意图: {intent}")
 
-        # 2. 关键词预处理（覆盖意图分类结果）
-        lower_input = user_input.lower()
-        is_weather_query = any(keyword in lower_input for keyword in ['天气', 'weather', '气温', '温度'])
+        # 按原始意图处理
+        if intent == "medical_inquiry":
+            # 医疗意图：走 RAG
+            result = chatbot.get_answer(user_input, session_id)
+            answer = result.get('answer', '抱歉，我没有找到相关信息。')
 
-        if is_weather_query:
-            # 强制按天气查询处理，不管意图分类结果是什么
-            import re
-            city_match = re.search(r'([A-Za-z\u4e00-\u9fa5]+)[天天气气温度]', lower_input)
-            if city_match:
-                city = city_match.group(1)
-                logger.info(f"Detected city: {city}")
-                weather_data = get_weather_info(city)
-                # 使用通用 LLM 生成回复，而非 RAG
-                formatted_prompt = general_prompt_template.format(
-                    query=user_input,
-                    additional_context=weather_data
-                )
-                answer = general_llm.invoke(formatted_prompt)
+        elif intent == "chat_general":
+            # 查询天气关键词预处理
+            lower_input = user_input.lower()
+            is_weather_query = any(keyword in lower_input for keyword in ['天气', 'weather', '气温', '温度'])
+            if is_weather_query:
+                import re
+                patterns = [
+                    r'(?:在|去|查|问问|了解)?([A-Za-z\u4e00-\u9fa5]{2,6}?)(?:今天|明天|后天|当前|现在的)?(?:的)?(?:天气|气温|温度|湿度|风|雨|晴|阴|雪|雾霾|空气质量)',
+                ]
+                city = None
+                for pattern in patterns:
+                    match = re.search(pattern, user_input)
+                    if match:
+                        city = match.group(1).strip()
+                        break
+                # 如果正则没提取到，再用LLM提取
+                if not city:
+                    city = extract_city_with_llm(user_input)
+                if city:
+                    logger.info(f"Detected city: {city}")
+                    weather_data = get_weather_info(city)
+                    # 使用通用 LLM 生成回复，而非 RAG
+                    formatted_prompt = general_prompt_template.format(
+                        query=user_input,
+                        additional_context=weather_data
+                    )
+                    answer = general_llm.invoke(formatted_prompt)
+                else:
+                    # 没有提取到城市，返回提示
+                    answer = "请告诉我具体的城市名称，例如'北京天气'或'上海今天气温'"
             else:
-                # 没有提取到城市，返回提示
-                answer = "请告诉我具体的城市名称，例如'北京天气'或'上海今天气温'"
-        else:
-            # 按原始意图处理
-            if intent == "medical_inquiry":
-                # 医疗意图：走 RAG
-                result = chatbot.get_answer(user_input, session_id)
-                answer = result.get('answer', '抱歉，我没有找到相关信息。')
-
-            elif intent == "chat_general":
                 # 闲聊意图：使用通用 LLM
                 formatted_prompt = general_prompt_template.format(
                     query=user_input,
@@ -165,41 +195,13 @@ async def api_chat(request: ChatRequest):
                 )
                 answer = general_llm.invoke(formatted_prompt)
 
-            elif intent == "system_query":
-                # 系统查询意图：也可以走通用 LLM，或根据具体内容判断
-                # 这里可以加入更多关键词判断，决定是否走天气查询
-                if is_weather_query:  # 双重保险
-                    # 同上，处理天气查询
-                    import re
-                    city_match = re.search(r'([A-Za-z\u4e00-\u9fa5]+)[今天天气温度]', lower_input)
-                    if city_match:
-                        city = city_match.group(1)
-                        logger.info(f"Detected city: {city}")
-                        weather_data = get_weather_info(city)
-                        formatted_prompt = general_prompt_template.format(
-                            query=user_input,
-                            additional_context=weather_data
-                        )
-                        answer = general_llm.invoke(formatted_prompt)
-                    else:
-                        # 无法提取城市，走通用闲聊
-                        formatted_prompt = general_prompt_template.format(
-                            query=user_input,
-                            additional_context=""
-                        )
-                        answer = general_llm.invoke(formatted_prompt)
-                else:
-                    # 其他系统查询，走通用 LLM
-                    formatted_prompt = general_prompt_template.format(
-                        query=user_input,
-                        additional_context=""
-                    )
-                    answer = general_llm.invoke(formatted_prompt)
-
-            else:
-                # 未知意图
-                result = chatbot.get_answer(user_input, session_id)
-                answer = result.get('answer', '我不太明白你的意思。')
+        elif intent == "system_query":
+            # 其他系统查询，走通用 LLM
+            formatted_prompt = general_prompt_template.format(
+                query=user_input,
+                additional_context=""
+            )
+            answer = general_llm.invoke(formatted_prompt)
 
         return ChatResponse(intent=intent, answer=answer)
 

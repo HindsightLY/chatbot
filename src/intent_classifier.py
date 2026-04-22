@@ -37,7 +37,7 @@ class IntentClassifier:
                 {
                     "name": "chat_general",
                     "description": "用户进行闲聊、打招呼、询问AI是谁、或者无关医疗的日常对话",
-                    "keywords": ["你好", "你是谁", "聊天", "名字", "干嘛"]
+                    "keywords": ["你好", "你是谁", "聊天", "名字", "干嘛", "天气", "日期", "时间"]
                 },
                 {
                     "name": "system_query",
