@@ -42,7 +42,7 @@ class VectorStoreManager:
         """
         return OllamaEmbeddings(
             model=APP_CONFIG.embedding_model_name,
-            base_url="http://localhost:11434"
+            base_url=APP_CONFIG.llm_base_url
         )
 
     def load_vector_store(self) -> Optional[FAISS]:

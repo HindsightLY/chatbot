@@ -4,6 +4,7 @@
 """
 import json
 from langchain_ollama import OllamaLLM
+from config.app_config import APP_CONFIG
 from .logger_config import logger
 
 
@@ -22,7 +23,7 @@ class IntentClassifier:
         """
         self.llm = OllamaLLM(
             model=model_name,
-            base_url="http://localhost:11434",
+            base_url=APP_CONFIG.llm_base_url,
             # temperature=0.0 用于分类任务，追求确定性
         )
 
