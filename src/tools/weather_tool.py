@@ -2,10 +2,10 @@
 工具模块
 提供各种实用工具，如天气查询、时间获取等
 """
-from config.settings import AMAP_WEATHER_URL, AMAP_API_KEY
 import requests
 from datetime import datetime
 from src.logger_config import logger
+from config.app_config import APP_CONFIG
 
 
 def get_current_weather(location, unit="celsius"):
@@ -44,12 +44,12 @@ def search_weather(city: str):
         str: 天气信息字符串或错误信息
     """
     params = {
-        'key': AMAP_API_KEY,
+        'key': APP_CONFIG.amap_api_key,
         'city': city,
         'extensions': 'base'  # 获取基本天气信息
     }
     try:
-        response = requests.get(AMAP_WEATHER_URL, params=params)
+        response = requests.get(APP_CONFIG.amap_weather_url, params=params)
         response.raise_for_status()  # 检查HTTP错误
         data = response.json()
 

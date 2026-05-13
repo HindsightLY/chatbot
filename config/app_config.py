@@ -47,6 +47,9 @@ class AppConfig(BaseModel):
         "乌鲁木齐", "拉萨", "呼和浩特", "香港", "澳门", "台北"
     ]
 
+    amap_api_key: str = "442835220e8faecaf0dc626b52e3f143"
+    amap_weather_url: str = "https://restapi.amap.com/v3/weather/weatherInfo"
+
     # 新闻类型验证
     valid_news_types: list = [
         "top", "shehui", "guonei", "guoji",
