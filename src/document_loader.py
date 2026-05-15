@@ -131,6 +131,6 @@ if __name__ == "__main__":
     # 加载并分块文档
     split_docs = doc_loader.load_and_split_documents()
 
-    print(f"📊 总共加载 {len(split_docs)} 个文档块")
+    logger.info(f"📊 总共加载 {len(split_docs)} 个文档块")
     if split_docs:
-        print(f"🔍 第一个块的内容: {split_docs[0].page_content[:200]}...")
+        logger.info(f"🔍 第一个块的内容: {split_docs[0].page_content[:200]}...")

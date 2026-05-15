@@ -66,17 +66,17 @@ class AppConfig(BaseModel):
         # 确保data目录存在
         if not os.path.exists(self.data_dir):
             os.makedirs(self.data_dir)
-            print(f"✅ 创建数据目录: {self.data_dir}")
+            logger.info(f"✅ 创建数据目录: {self.data_dir}")
 
         # 确保disease目录存在
         if not os.path.exists(self.disease_dir):
             os.makedirs(self.disease_dir)
-            print(f"✅ 创建疾病文档目录: {self.disease_dir}")
+            logger.info(f"✅ 创建疾病文档目录: {self.disease_dir}")
 
         # 确保faiss_index目录存在
         if not os.path.exists(self.vector_persist_dir):
             os.makedirs(self.vector_persist_dir)
-            print(f"✅ 创建向量索引目录: {self.vector_persist_dir}")
+            logger.info(f"✅ 创建向量索引目录: {self.vector_persist_dir}")
 
 
 # 全局配置实例

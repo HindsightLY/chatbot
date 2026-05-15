@@ -44,9 +44,9 @@ class HybridChatMemory:
                     self.embedding,
                     allow_dangerous_deserialization=True
                 )
-                print(f"✅ 加载历史对话向量库，包含 {self.vector_store.index.ntotal} 个对话")
+                logger.info(f"✅ 加载历史对话向量库，包含 {self.vector_store.index.ntotal} 个对话")
             except Exception as e:
-                print(f"⚠️ 加载历史对话失败: {e}，创建新的向量库")
+                logger.info(f"⚠️ 加载历史对话失败: {e}，创建新的向量库")
                 self.vector_store = self._create_empty_vector_store()
         else:
             self.vector_store = self._create_empty_vector_store()
@@ -104,7 +104,7 @@ class HybridChatMemory:
         # 保存到磁盘
         index_path = os.path.join(self.persist_dir, "index")
         self.vector_store.save_local(index_path)
-        print(f"💾 保存对话历史到FAISS，当前总数: {self.vector_store.index.ntotal}")
+        logger.info(f"💾 保存对话历史到FAISS，当前总数: {self.vector_store.index.ntotal}")
 
     def get_relevant_history(self, session_id, current_query, k=3):
         """获取相关的对话历史"""
@@ -148,7 +148,7 @@ class HybridChatMemory:
 
             return relevant_dialogues
         except Exception as e:
-            print(f"🔍 搜索历史对话失败: {e}")
+            logger.info(f"🔍 搜索历史对话失败: {e}")
             return []
 
     def _format_history_for_prompt(self, history_list):
@@ -171,7 +171,7 @@ class HybridChatMemory:
             del self.memory_cache[session_id]
 
         # 从FAISS中删除该会话的所有记录（简化版，实际需要重建索引）
-        print(f"🧹 清除会话 {session_id} 的记忆")
+        logger.info(f"🧹 清除会话 {session_id} 的记忆")
 
 
 class MedicalChatbot:

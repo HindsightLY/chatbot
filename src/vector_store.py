@@ -33,6 +33,15 @@ class VectorStoreManager:
 
         logger.info(f"📁 向量存储目录: {self.persist_dir}")
 
+        self._vector_store = None  # 缓存实例
+
+    @property
+    def vector_store(self):
+        """懒加载向量存储"""
+        if self._vector_store is None:
+            self._vector_store = self.load_vector_store()
+        return self._vector_store
+
     def _create_embedding_model(self) -> OllamaEmbeddings:
         """
         创建嵌入模型实例
@@ -121,7 +130,7 @@ class VectorStoreManager:
         if score_threshold is None:
             score_threshold = APP_CONFIG.retrieval_score_threshold
 
-        vector_store = self.load_vector_store()
+        vector_store = self._vector_store
         if not vector_store:
             logger.warning("⚠️ 向量库未加载，无法执行搜索")
             return []
@@ -157,7 +166,7 @@ class VectorStoreManager:
         Returns:
             检索器对象
         """
-        vector_store = self.load_vector_store()
+        vector_store = self._vector_store
         if not vector_store:
             return None
 

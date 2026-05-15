@@ -2,13 +2,13 @@
 工具管理服务
 统一管理各种外部工具和服务
 """
-import re
 from typing import Optional
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
 from config.app_config import APP_CONFIG
 from src.tools.weather_tool import get_weather_info
 from src.logger_config import logger
+from src.utils.text_utils import extract_city_from_text
 
 
 class ToolManager:
@@ -31,29 +31,6 @@ class ToolManager:
             "{additional_context}\n"
             "请直接回答用户的问题，语言亲切自然。"
         )
-
-    def extract_city_by_regex(self, query: str) -> Optional[str]:
-        """
-        使用正则表达式从查询中提取城市名
-
-        Args:
-            query: 用户查询
-
-        Returns:
-            Optional[str]: 提取的城市名，如果未找到则返回None
-        """
-        patterns = [
-            r'(?:在|去|查|问问|了解)?([A-Za-z\u4e00-\u9fa5]{2,6}?)(?:今天|明天|后天|当前|现在的)?(?:的)?(?:天气|气温|温度|湿度|风|雨|晴|阴|雪|雾霾|空气质量)',
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, query)
-            if match:
-                city = match.group(1).strip()
-                if city in APP_CONFIG.common_cities:
-                    return city
-
-        return None
 
     def extract_city_by_llm(self, query: str) -> Optional[str]:
         """
@@ -95,7 +72,7 @@ class ToolManager:
             str: 天气响应
         """
         # 尝试正则提取城市
-        city = self.extract_city_by_regex(query)
+        city = extract_city_from_text(query)
 
         # 如果正则未提取到，再用LLM提取
         if not city:

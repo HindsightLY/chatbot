@@ -50,10 +50,10 @@ def run_cli():
                 lower_input = user_input.lower()
                 if any(keyword in lower_input for keyword in ['天气', 'weather', '气温', '温度']):
                     response = tool_manager.get_weather_response(user_input)
-                    print(f"AI: {response}")
+                    logger.info(f"AI: {response}")
                 else:
                     response = tool_manager.handle_general_query(user_input)
-                    print(f"AI: {response}")
+                    logger.info(f"AI: {response}")
             else:
                 # 未知意图或其他，默认走RAG流程
                 chatbot.ask_stream(user_input, session_id=current_session_id)

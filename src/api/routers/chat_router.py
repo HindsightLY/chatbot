@@ -40,7 +40,6 @@ async def api_chat(request: ChatRequest):
         ChatResponse: 聊天响应
     """
     # 获取系统组件
-    vector_store = system_initializer.vector_store
     intent_classifier = system_initializer.intent_classifier
     chatbot = system_initializer.chatbot
 
@@ -101,7 +100,6 @@ async def api_chat_stream(request: ChatRequest):
     from fastapi.responses import StreamingResponse
 
     # 获取系统组件
-    vector_store = system_initializer.vector_store
     intent_classifier = system_initializer.intent_classifier
     chatbot = system_initializer.chatbot
 
