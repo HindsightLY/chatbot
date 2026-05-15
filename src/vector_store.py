@@ -104,7 +104,7 @@ class VectorStoreManager:
             raise
 
     def similarity_search(self, query: str, k: int = None,
-                         score_threshold: float = None) -> List[Document]:
+                          score_threshold: float = None) -> List[Document]:
         """
         执行相似度搜索
 

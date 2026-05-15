@@ -8,6 +8,7 @@ from urllib import parse, request
 from src.logger_config import logger
 from pydantic import BaseModel
 
+
 # https://www.juhe.cn/docs/api/id/235
 class JuHeNewsClient:
     """

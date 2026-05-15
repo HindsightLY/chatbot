@@ -4,7 +4,6 @@
 """
 import re
 from typing import Optional
-
 from config.app_config import APP_CONFIG
 
 
