@@ -5,7 +5,7 @@
 import json
 from langchain_ollama import OllamaLLM
 from config.app_config import APP_CONFIG
-from .logger_config import logger
+from src.utils.logger_config import logger
 
 
 class IntentClassifier:

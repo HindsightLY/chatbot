@@ -7,7 +7,7 @@ from typing import List, Optional
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_core.documents import Document
-from src.logger_config import logger
+from src.utils.logger_config import logger
 from config.app_config import APP_CONFIG
 
 

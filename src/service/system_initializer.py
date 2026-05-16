@@ -3,12 +3,12 @@
 负责系统的整体初始化逻辑
 """
 from typing import Tuple
-from src.logger_config import logger
+from src.utils.logger_config import logger
 from config.app_config import APP_CONFIG
-from src.document_loader import DocumentLoader
-from src.vector_store import VectorStoreManager
-from src.intent_classifier import IntentClassifier
-from src.chatbot import MedicalChatbot
+from src.service.document_loader import DocumentLoader
+from src.service.vector_store import VectorStoreManager
+from src.service.intent_classifier import IntentClassifier
+from src.service.chatbot import MedicalChatbot
 
 
 class SystemInitializer:

@@ -9,7 +9,7 @@ from langchain_core.documents import Document
 from langchain_ollama import OllamaEmbeddings
 from config.app_config import APP_CONFIG
 from langchain_ollama import OllamaLLM
-from .logger_config import logger
+from src.utils.logger_config import logger
 from datetime import datetime
 import os
 
@@ -22,7 +22,7 @@ class HybridChatMemory:
     混合聊天记忆存储：内存缓存 + FAISS向量存储
     """
 
-    def __init__(self, persist_dir="data/chat_memory"):
+    def __init__(self, persist_dir="../data/chat_memory"):
         self.memory_cache = {}  # 内存缓存：存储最近N轮对话
         self.persist_dir = persist_dir
         self.max_cache_turns = 10  # 每个会话在内存中缓存的最大轮数

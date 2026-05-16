@@ -7,7 +7,7 @@ from typing import List
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from config.app_config import APP_CONFIG
-from src.logger_config import logger
+from src.utils.logger_config import logger
 
 
 class DocumentLoader:

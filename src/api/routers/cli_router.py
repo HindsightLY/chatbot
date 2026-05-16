@@ -1,4 +1,4 @@
-from src.logger_config import monitor_performance, logger
+from src.utils.logger_config import monitor_performance, logger
 from src.service.system_initializer import system_initializer
 
 

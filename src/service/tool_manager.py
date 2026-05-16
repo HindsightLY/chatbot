@@ -7,7 +7,7 @@ from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
 from config.app_config import APP_CONFIG
 from src.tools.weather_tool import get_weather_info
-from src.logger_config import logger
+from src.utils.logger_config import logger
 from src.utils.text_utils import extract_city_from_text
 
 

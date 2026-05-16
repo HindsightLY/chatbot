@@ -4,7 +4,7 @@
 """
 import requests
 from datetime import datetime
-from src.logger_config import logger
+from src.utils.logger_config import logger
 from config.app_config import APP_CONFIG
 
 

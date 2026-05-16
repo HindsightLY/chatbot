@@ -5,7 +5,7 @@
 import json
 import os
 from urllib import parse, request
-from src.logger_config import logger
+from src.utils.logger_config import logger
 from pydantic import BaseModel
 
 

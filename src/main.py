@@ -5,7 +5,7 @@
 import uvicorn
 import argparse
 from fastapi import FastAPI
-from src.logger_config import logger
+from src.utils.logger_config import logger
 from config.app_config import APP_CONFIG
 from src.api.routers.cli_router import run_cli
 from src.api.routers.chat_router import router as chat_router
