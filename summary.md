@@ -75,6 +75,7 @@ RAG 系统的优化是一个持续迭代的过程，可以从以下三个层面�
     *   *项目切入点*：调整 `config/app_config.py` 中的 `chunk_size` 和 `chunk_overlap`，观察对回答的影响。
 *   **引入重排序 (Re-Ranking)**：先用向量数据库召回 20 个结果，再用一个更精准的小模型对这 20 个结果进行打分和重新排序，取前 5 个给大模型。
     *   *项目切入点*：目前项目是直接取 Top-K，可以增加一个重排序步骤。
+    * https://www.qianwen.com/share/chat/8420dde537424dfd90ac24089c8b11a6
 *   **优化嵌入模型**：尝试使用专门针对中文或医疗领域微调过的嵌入模型，其语义表达能力会更强。
     *   *项目切入点*：在 `vector_store.py` 中更换 `embedding_model_name`。
 
