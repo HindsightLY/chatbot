@@ -1,45 +1,51 @@
 """
-聊天API路由器
-处理所有聊天相关的API请求
+聊天 API 路由器
+FastAPI 路由层，负责请求分发
+
+路由策略（意图驱动）:
+  POST /api/chat        — 普通问答
+  POST /api/chat/stream — SSE 流式问答
+  POST /api/chat/daily_news — 新闻查询
+
+核心分发逻辑:
+  intent_classifier.classify()
+    ├─ medical_inquiry → MedicalChatbot.get_answer()
+    ├─ chat_general    → ToolManager (天气/闲聊)
+    ├─ system_query    → ToolManager.handle_general_query()
+    └─ unknown         → 兜底 RAG
 """
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from config.app_config import APP_CONFIG
 from src.tools.news_tool import get_daily_news, NewsResponse, NewsRequest
 from src.utils.logger_config import logger
+from src.utils.text_utils import is_weather_query
 from src.service.system_initializer import system_initializer
 from src.service.tool_manager import tool_manager
 
 
-# API请求/响应模型
 class ChatRequest(BaseModel):
-    """聊天请求数据模型"""
+    """聊天请求"""
     query: str
     session_id: str = "default_user"
 
 
 class ChatResponse(BaseModel):
-    """聊天响应数据模型"""
+    """聊天响应"""
     intent: str
     answer: str
 
 
-# 创建路由器实例
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 
 @router.post("", response_model=ChatResponse)
 async def api_chat(request: ChatRequest):
     """
-    聊天API接口
+    普通问答接口
 
-    Args:
-        request: 聊天请求
-
-    Returns:
-        ChatResponse: 聊天响应
+    流程: 意图分类 → 路由 → 调用对应处理器 → 返回结果
     """
-    # 获取系统组件
     intent_classifier = system_initializer.intent_classifier
     chatbot = system_initializer.chatbot
 
@@ -50,32 +56,23 @@ async def api_chat(request: ChatRequest):
     session_id = request.session_id
 
     try:
-        # 1. 意图识别
         intent = intent_classifier.classify(user_input)
         logger.info(f"🔍 识别意图: {intent}")
 
-        # 按意图处理
         if intent == "medical_inquiry":
-            # 医疗意图：走 RAG
             result = chatbot.get_answer(user_input, session_id)
             answer = result.get('answer', '抱歉，我没有找到相关信息。')
 
         elif intent == "chat_general":
-            # 处理天气查询
-            lower_input = user_input.lower()
-            is_weather_query = any(keyword in lower_input for keyword in ['天气', 'weather', '气温', '温度'])
-            if is_weather_query:
+            if is_weather_query(user_input):
                 answer = tool_manager.get_weather_response(user_input)
             else:
-                # 闲聊意图：使用通用 LLM
                 answer = tool_manager.handle_general_query(user_input)
 
         elif intent == "system_query":
-            # 系统查询，走通用 LLM
             answer = tool_manager.handle_general_query(user_input)
 
         else:
-            # 未知意图，默认走RAG
             result = chatbot.get_answer(user_input, session_id)
             answer = result.get('answer', '抱歉，我没有找到相关信息。')
 
@@ -89,17 +86,13 @@ async def api_chat(request: ChatRequest):
 @router.post("/stream")
 async def api_chat_stream(request: ChatRequest):
     """
-    流式聊天API接口
+    SSE 流式问答接口
 
-    Args:
-        request: 聊天请求
-
-    Returns:
-        StreamingResponse: 流式响应
+    注意: 当前所有处理器均为同步阻塞调用，返回后才逐字符 yield，
+    并非真正的流式生成。未来可替换为 llm.stream() 实现逐 token 输出。
     """
     from fastapi.responses import StreamingResponse
 
-    # 获取系统组件
     intent_classifier = system_initializer.intent_classifier
     chatbot = system_initializer.chatbot
 
@@ -109,34 +102,22 @@ async def api_chat_stream(request: ChatRequest):
     user_input = request.query
     session_id = request.session_id
 
-    # 意图识别
     intent = intent_classifier.classify(user_input)
 
     async def generate_response():
         try:
-            # 根据意图决定使用哪种响应方式
             if intent == "medical_inquiry":
-                # 医疗意图：使用RAG流式响应
                 for char in chatbot.ask_stream(user_input, session_id=session_id):
                     if char:
                         yield char
             elif intent == "chat_general":
-                # 通用意图：根据具体情况决定
-                lower_input = user_input.lower()
-                is_weather_query = any(keyword in lower_input for keyword in ['天气', 'weather', '气温', '温度'])
-
-                if is_weather_query:
-                    # 天气查询：生成一次性响应然后流式输出
+                if is_weather_query(user_input):
                     response = tool_manager.get_weather_response(user_input)
-                    for char in response:
-                        yield char
                 else:
-                    # 闲聊：生成一次性响应然后流式输出
                     response = tool_manager.handle_general_query(user_input)
-                    for char in response:
-                        yield char
+                for char in response:
+                    yield char
             else:
-                # 其他意图：使用RAG流式响应
                 for char in chatbot.ask_stream(user_input, session_id=session_id):
                     if char:
                         yield char
@@ -152,25 +133,20 @@ async def api_chat_stream(request: ChatRequest):
 @router.post("/daily_news", response_model=NewsResponse)
 async def daily_news(request: NewsRequest = None):
     """
-    每日新闻API接口
+    每日新闻查询
 
-    Args:
-        request: 新闻请求，如果为None则使用默认值
-
-    Returns:
-        NewsResponse: 新闻响应
+    通过聚合数据 API 获取各类型新闻。
+    类型列表见 APP_CONFIG.valid_news_types。
     """
     if request is None:
         request = NewsRequest()
 
     news_type = request.news_type
 
-    # 验证新闻类型
     if news_type not in APP_CONFIG.valid_news_types:
-        news_type = "top"  # 默认为top
+        news_type = "top"
 
     try:
-        # 获取新闻数据
         news_result = get_daily_news(news_type)
 
         if news_result["success"]:

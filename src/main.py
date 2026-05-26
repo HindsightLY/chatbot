@@ -1,6 +1,15 @@
 """
-主应用模块
-提供API服务和命令行界面
+主应用入口
+
+两种运行模式:
+  python main.py --api   → FastAPI 服务 (默认)
+  python main.py         → CLI 交互界面
+
+启动流程:
+  1. 确保数据目录存在 (ensure_data_dirs)
+  2. 创建 FastAPI 实例并注册路由
+  3. API 模式: uvicorn 启动，startup 事件中初始化系统组件
+  4. CLI 模式: run_cli() 直接触发初始化
 """
 import uvicorn
 import argparse
@@ -11,24 +20,19 @@ from src.api.routers.cli_router import run_cli
 from src.api.routers.chat_router import router as chat_router
 from src.service.system_initializer import system_initializer
 
-# 确保数据目录存在
 APP_CONFIG.ensure_data_dirs()
 
-# 创建FastAPI应用实例
 app = FastAPI(
     title="医疗咨询AI API",
     description="基于RAG的医疗问答接口"
 )
 
-# 注册API路由
 app.include_router(chat_router)
 
 
 @app.on_event("startup")
 def startup_event():
-    """
-    FastAPI启动时自动运行
-    """
+    """FastAPI 启动时初始化系统组件"""
     logger.info("🚀 正在初始化医疗AI系统...")
     system_initializer.initialize_system()
     logger.info("🎉 系统初始化完成，API 就绪！")
@@ -42,11 +46,9 @@ if __name__ == "__main__":
     parser.add_argument("--host", default=APP_CONFIG.api_host, help="API 监听地址")
     parser.add_argument("--port", type=int, default=APP_CONFIG.api_port, help="API 监听端口")
 
-    args = parser.parse_args(['--api'])
+    args = parser.parse_args()
 
     if args.api:
-        # 启动 API 模式
         uvicorn.run(app, host=args.host, port=args.port, reload=False)
     else:
-        # 启动 CLI 模式 (默认)
         run_cli()

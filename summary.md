@@ -1,102 +1,77 @@
-很高兴能为你详细梳理 RAG（检索增强生成）的全流程。结合你提供的医疗咨询项目代码，我们可以清晰地看到一个 RAG 应用从数据准备到最终回答用户的完整闭环。
+# RAG 全流程梳理（基于本项目代码）
 
-RAG 的核心思想是：**让大模型（LLM）在回答问题前，先去查阅相关的外部资料，从而保证回答的准确性和时效性**。这在医疗、法律等专业领域至关重要。
-
----
-
-### 📚 RAG 全流程概览
-
-一个标准的 RAG 系统主要包含三个阶段：
-
-1.  **数据准备阶段 (Ingestion)**：获取原始数据，进行清洗、分块，并转换为向量存储到数据库中。这是“建立知识库”的过程。
-2.  **检索阶段 (Retrieval)**：当用户提问时，系统将问题转化为向量，在知识库中进行相似度搜索，找出最相关的资料片段。
-3.  **生成阶段 (Generation)**：将检索到的资料片段作为上下文，连同用户问题一起交给大模型，让模型基于这些事实生成回答。
+RAG 的核心思想：**让 LLM 在回答前先去查阅相关的外部资料**，保证回答的准确性和时效性。
 
 ---
 
-### 🛠️ RAG 系统搭建与优化详解
+## 三阶段概览
 
-#### 1. 数据准备阶段：构建知识库
+### 1. 数据准备（Ingestion）
 
-这是 RAG 的基石。数据的质量直接决定了回答的质量。
+**原理**: 非结构化文本 → 分块 → 向量化 → 存入向量库
 
-*   **原理**：将非结构化的文本（如 PDF、TXT）切分成小块（Chunks），然后使用**嵌入模型 (Embedding Model)** 将这些文本块转化为高维向量（Vector）。这些向量被存储在**向量数据库 (Vector Database)** 中，以便后续快速检索。
-*   **关键点**：
-    *   **文本分块 (Text Splitting)**：分块大小（`chunk_size`）和重叠长度（`chunk_overlap`）是关键参数。太小会丢失上下文，太大则检索不精准。
-    *   **嵌入模型**：负责将文字转化为数字向量，捕捉语义信息。
+**本项目实现** (`document_loader.py` + `vector_store.py`):
+1. `DocumentLoader.load_and_split_documents()` 读取 `data/disease/` 下 `.txt/.md` 文件
+2. `RecursiveCharacterTextSplitter` 递归分块（chunk_size=500, chunk_overlap=100）
+3. `VectorStoreManager.create_vector_store()` 用 `OllamaEmbeddings(nomic-embed-text)` 转为 768 维向量
+4. `FAISS.from_documents()` 构建索引并持久化到 `data/faiss_index/`
 
-*   **结合项目代码分析**：
-    *   **文档加载与分块**：`document_loader.py` 负责此任务。它读取 `disease/` 目录下的文档，并使用 `RecursiveCharacterTextSplitter` 进行分块。
-        *   *代码定位*：`DocumentLoader` 类中的 `_create_text_splitter` 方法，它使用了配置文件中的 `chunk_size` 和 `chunk_overlap` 参数。
-    *   **向量库创建**：`vector_store.py` 负责将分块后的文档存入 FAISS 数据库。
-        *   *代码定位*：`VectorStoreManager` 类的 `create_vector_store` 方法。它调用了 `FAISS.from_documents()`，内部使用了 `OllamaEmbeddings` 模型（在 `__init__` 中初始化）将文本转化为向量。
+### 2. 检索（Retrieval）
 
-#### 2. 检索阶段：寻找相关知识
+**原理**: 用户问题 → 向量化 → 向量库相似度搜索 → 返回 Top-K 相关文档
 
-当用户提出问题时，系统需要快速从海量数据中找到“最可能包含答案”的部分。
+**本项目实现** (`vector_store.py`):
+1. `similarity_search_with_relevance_scores(query, k=6)` 召回候选
+2. `score_threshold=0.3` 过滤低相关结果
+3. `MedicalChatbot` 初始化时通过 `vector_store.as_retriever()` 创建检索器
 
-*   **原理**：系统同样使用嵌入模型将用户问题转化为向量，然后在向量数据库中计算“距离”（如余弦相似度），找出距离最近的 Top-K 个向量。
-*   **关键点**：
-    *   **相似度搜索**：核心算法，用于匹配问题和文档块。
-    *   **相关性阈值**：设置一个分数门槛，低于该分数的检索结果会被过滤掉，防止模型看到不相关的信息。
+### 3. 生成（Generation）
 
-*   **结合项目代码分析**：
-    *   **检索执行**：`vector_store.py` 中的 `similarity_search` 方法实现了这一逻辑。
-        *   *代码定位*：该方法调用了 `vector_store.similarity_search_with_relevance_scores`，它不仅返回结果，还附带了相关性分数（Score），并根据配置的 `retrieval_score_threshold` 进行过滤。
-    *   **检索器封装**：`MedicalChatbot` 类在初始化时，会创建一个 `retriever` 对象。
-        *   *代码定位*：`chatbot.py` 中 `self.retriever = vector_store.as_retriever()`。这个 `retriever` 对象会在问答时被调用，负责具体的搜索工作。
+**原理**: 系统指令 + 检索结果 + 对话历史 + 用户问题 → LLM → 回答
 
-#### 3. 生成阶段：合成最终回答
-
-这是 RAG 的“大脑”，将检索到的事实与语言生成能力结合。
-
-*   **原理**：构建一个 Prompt，其中包含三部分：(1) 系统指令（告诉模型如何做）、(2) 检索到的上下文（事实依据）、(3) 用户问题。将这个 Prompt 输入给大语言模型（LLM），生成最终回答。
-*   **关键点**：
-    *   **Prompt 工程**：如何设计 Prompt，让模型只基于提供的上下文回答，避免“胡说八道”（幻觉）。
-    *   **对话记忆**：在多轮对话中，需要将历史对话信息也注入到 Prompt 中，保证对话连贯。
-
-*   **结合项目代码分析**：
-    *   **Prompt 构建与链式调用**：`chatbot.py` 是核心。
-        *   *代码定位*：`MedicalChatbot` 类的 `__init__` 方法中定义了 `PromptTemplate`。模板中明确包含了 `{chat_history}` 和 `{context}` 占位符。
-        *   *代码定位*：`create_retrieval_chain` 方法将 `retriever`（检索）和 `document_chain`（生成）串联起来，形成了完整的 RAG 流程。
-    *   **意图路由**：`chat_router.py` 在调用 `chatbot` 前，会先通过 `intent_classifier.py` 判断用户意图。只有当意图是 `medical_inquiry` 时，才会走上述的 RAG 流程。
+**本项目实现** (`chatbot.py`):
+1. `PromptTemplate` 组装 `{context}`(检索文档)、`{relevant_history}`(对话历史)、`{input}`(问题)
+2. LCEL 管道: `{ dict } | prompt | llm` 端到端调用
+3. `HybridChatMemory` 提供两级记忆: 内存(最近10轮) + FAISS(历史语义检索)
 
 ---
 
-### 🚀 RAG 系统优化方向
+## 意图路由
 
-RAG 系统的优化是一个持续迭代的过程，可以从以下三个层面入手：
+```
+用户输入 → IntentClassifier.classify()
+  ├─ medical_inquiry → MedicalChatbot.get_answer()  ← RAG 主流程
+  ├─ chat_general    → ToolManager (天气/闲聊)
+  ├─ system_query    → ToolManager (通用 LLM)
+  └─ unknown         → 兜底走 RAG
+```
 
-#### 1. 检索质量优化 (Recall & Precision)
+分类基于 LLM（同 RAG 用同一个 qwen2.5:7b），通过结构化 Prompt 输出 JSON。
 
-目标是让模型“找得更准”。
+---
 
-*   **优化文本分块策略**：尝试不同的分块大小和分隔符。例如，按段落或章节切分，而不是固定长度。
-    *   *项目切入点*：调整 `config/app_config.py` 中的 `chunk_size` 和 `chunk_overlap`，观察对回答的影响。
-*   **引入重排序 (Re-Ranking)**：先用向量数据库召回 20 个结果，再用一个更精准的小模型对这 20 个结果进行打分和重新排序，取前 5 个给大模型。
-    *   *项目切入点*：目前项目是直接取 Top-K，可以增加一个重排序步骤。
-    * https://www.qianwen.com/share/chat/8420dde537424dfd90ac24089c8b11a6
-*   **优化嵌入模型**：尝试使用专门针对中文或医疗领域微调过的嵌入模型，其语义表达能力会更强。
-    *   *项目切入点*：在 `vector_store.py` 中更换 `embedding_model_name`。
+## 关键优化点
 
-#### 2. 生成质量优化 (Generation Quality)
+### 检索质量
+- 分块策略：按中文标点符号递归分割，语义单元更完整
+- 相关性阈值：score_threshold=0.3 过滤噪声
+- 元数据过滤：按 session_id 限定对话历史搜索范围
 
-目标是让模型“答得更好”。
+### 记忆管理
+- 内存缓存：最近 10 轮零延迟读取
+- 溢出迁移：超出上限的记录写入 FAISS，兼顾性能与持久化
+- 两路合并：`get_relevant_history()` 合并内存最近记录 + FAISS 语义相关记录
 
-*   **Prompt 精调**：明确告诉模型，如果上下文中没有答案，应该回答“我不知道”，而不是编造信息。
-    *   *项目切入点*：修改 `chatbot.py` 中的 `PromptTemplate`，强化“基于医学资料回答”的指令。
-*   **结果后处理**：对模型生成的结果进行关键词提取、实体识别或敏感词过滤。
-    *   *项目切入点*：利用 `text_utils.py` 中的 `clean_text` 或 `format_response` 对输出进行标准化。
+### 天气提取
+- 先正则快速匹配常见模式（"北京天气"）
+- 正则失败后用 LLM 语义兜底
+- 输出后过滤 "未找到"、"没有" 等无效结果
 
-#### 3. 系统架构与体验优化 (System & UX)
+---
 
-目标是让系统“更快、更稳、更智能”。
+## 运行方式
 
-*   **流式输出 (Streaming)**：让用户感觉像在和真人聊天，文字逐个字符输出，体验更好。
-    *   *项目切入点*：`chat_router.py` 中的 `api_chat_stream` 接口已经实现了这一点，前端可以利用这个接口优化体验。
-*   **缓存机制**：对高频问题（如“感冒怎么办”）的结果进行缓存，减少模型调用，降低成本，提高响应速度。
-    *   *项目切入点*：可以在 `chat_router.py` 中增加 Redis 缓存层。
-*   **混合检索**：结合关键词检索（如 BM25）和向量检索，兼顾语义和精确匹配。
-    *   *项目切入点*：目前项目仅使用向量检索，可以增加关键词检索作为补充。
-
-通过以上三个阶段的搭建和持续优化，你的医疗咨询 AI 将能从一个简单的原型，逐步进化为一个专业、可靠、高效的生产级应用。
+```bash
+python src/main.py           # CLI 交互
+python src/main.py --api     # FastAPI 服务
+```

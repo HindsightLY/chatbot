@@ -1,63 +1,41 @@
 """
-工具模块
-提供各种实用工具，如天气查询、时间获取等
+天气查询工具
+调用高德地图天气 API 获取实时天气
+
+被 tool_manager.py 的 get_weather_response() 调用:
+  extract_city_from_text()  →  search_weather()  →  LLM 润色
+  extract_city_by_llm()    ↗
 """
 import requests
-from datetime import datetime
-from src.utils.logger_config import logger
 from config.app_config import APP_CONFIG
-
-
-def get_current_weather(location, unit="celsius"):
-    """
-    获取指定地点的天气情况
-
-    Args:
-        location: 地点名称
-        unit: 温度单位，默认摄氏度
-
-    Returns:
-        str: 天气信息
-    """
-    return search_weather(city=location)
-
-
-def get_current_time():
-    """
-    获取当前时间
-
-    Returns:
-        str: 格式化的时间字符串
-    """
-    now = datetime.now()
-    return f"当前时间是 {now.strftime('%Y年%m月%d日 %H:%M:%S')}，星期{now.strftime('%A')[:2]}"
+from src.utils.logger_config import logger
 
 
 def search_weather(city: str):
     """
-    调用高德天气API获取天气信息
+    高德天气 API 封装
 
     Args:
-        city: 城市名称
+        city: 城市名（如 "北京"）
 
     Returns:
-        str: 天气信息字符串或错误信息
+        格式化天气描述字符串，或错误信息
     """
     params = {
         'key': APP_CONFIG.amap_api_key,
         'city': city,
-        'extensions': 'base'  # 获取基本天气信息
+        'extensions': 'base'
     }
     try:
         response = requests.get(APP_CONFIG.amap_weather_url, params=params)
-        response.raise_for_status()  # 检查HTTP错误
+        response.raise_for_status()
         data = response.json()
 
         if data.get('status') == '1':
             weather_info_list = data.get('lives', [])
             if weather_info_list:
                 weather = weather_info_list[0]
-                info = (
+                return (
                     f"{weather['city']}的天气情况：\n"
                     f"天气: {weather['weather']}\n"
                     f"温度: {weather['temperature']}°C\n"
@@ -65,7 +43,6 @@ def search_weather(city: str):
                     f"风向: {weather['winddirection']}\n"
                     f"风力: {weather['windpower']}级"
                 )
-                return info
             else:
                 return f"未能获取到 {city} 的天气信息。"
         else:
@@ -77,50 +54,3 @@ def search_weather(city: str):
     except Exception as e:
         logger.error(f"解析高德天气API响应时发生错误: {e}")
         return "获取天气信息时出现解析错误。"
-
-
-def get_weather_info(city: str):
-    """
-    获取天气信息的函数，供main.py调用
-
-    Args:
-        city: 城市名称
-
-    Returns:
-        str: 天气信息字符串
-    """
-    return search_weather(city)
-
-
-# 定义工具描述，供Agent使用
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_current_weather",
-            "description": "获取指定地点的天气情况",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "城市名称，例如 北京, 上海",
-                    },
-                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
-                },
-                "required": ["location"],
-            },
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_current_time",
-            "description": "获取当前时间",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-            },
-        }
-    }
-]

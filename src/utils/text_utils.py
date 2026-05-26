@@ -1,6 +1,10 @@
 """
 文本工具模块
-提供通用的文本处理函数
+提供通用的文本处理函数，被多个模块引用:
+
+  - extract_city_from_text()  — tool_manager.py (城市提取)
+  - is_weather_query()        — chat_router.py, cli_router.py (天气判别)
+  - clean_text() / truncate_text() / format_response() — 通用文本处理
 """
 import re
 from typing import Optional
@@ -9,15 +13,14 @@ from config.app_config import APP_CONFIG
 
 def extract_city_from_text(text: str) -> Optional[str]:
     """
-    从文本中提取城市名
+    从文本中提取城市名（两阶段: 正则 → 列表匹配）
 
-    Args:
-        text: 输入文本
+    Strategy:
+      1. 正则匹配 "X天气" 等常见模式
+      2. 在 common_cities 列表中全量匹配
 
-    Returns:
-        Optional[str]: 提取的城市名，如果未找到则返回None
+    Note: 这是快速路径，失败后由 tool_manager.extract_city_by_llm() 兜底
     """
-    # 尝试正则匹配
     patterns = [
         r'(?:在|去|查|问问|了解)?([A-Za-z\u4e00-\u9fa5]{2,6}?)(?:今天|明天|后天|当前|现在的)?(?:的)?(?:天气|气温|温度|湿度|风|雨|晴|阴|雪|雾霾|空气质量)',
         r'([A-Za-z\u4e00-\u9fa5]{2,6}?)\s+(?:天气|气温|温度)',
@@ -30,7 +33,6 @@ def extract_city_from_text(text: str) -> Optional[str]:
             if city in APP_CONFIG.common_cities:
                 return city
 
-    # 尝试从常见城市列表中匹配
     for city in APP_CONFIG.common_cities:
         if city in text:
             return city
@@ -38,40 +40,32 @@ def extract_city_from_text(text: str) -> Optional[str]:
     return None
 
 
+WEATHER_KEYWORDS = ['天气', 'weather', '气温', '温度']
+
+
+def is_weather_query(text: str) -> bool:
+    """检查用户输入是否为天气查询（大小写不敏感）"""
+    return any(keyword in text.lower() for keyword in WEATHER_KEYWORDS)
+
+
 def clean_text(text: str) -> str:
-    """
-    清理文本，去除多余空白和特殊字符
-
-    Args:
-        text: 输入文本
-
-    Returns:
-        str: 清理后的文本
-    """
-    # 去除首尾空白
+    """去除多余空白和不可见字符"""
     text = text.strip()
-    # 替换多个空白为单个空格
     text = re.sub(r'\s+', ' ', text)
-    # 去除不可见字符
     text = re.sub(r'[^\x20-\x7E\u4e00-\u9fa5，。、；：‘’“”【】《》？！……（）]', '', text)
     return text
 
 
 def truncate_text(text: str, max_length: int = 500) -> str:
     """
-    截断文本
-
-    Args:
-        text: 输入文本
-        max_length: 最大长度
+    在句子边界截断文本，避免截断在词中间
 
     Returns:
-        str: 截断后的文本
+        截断后的文本，末尾追加 "..."
     """
     if len(text) <= max_length:
         return text
 
-    # 在句子边界截断
     sentences = re.split(r'(?<=[。！？；])', text)
     result = ''
     for sentence in sentences:
@@ -86,16 +80,7 @@ def truncate_text(text: str, max_length: int = 500) -> str:
 
 
 def format_response(response: str, max_line_length: int = 80) -> str:
-    """
-    格式化响应文本
-
-    Args:
-        response: 响应文本
-        max_line_length: 每行最大长度
-
-    Returns:
-        str: 格式化后的文本
-    """
+    """按标点符号换行，保证每行不超过 max_line_length"""
     lines = []
     current_line = ''
 

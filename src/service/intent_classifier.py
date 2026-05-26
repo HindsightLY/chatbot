@@ -1,6 +1,11 @@
 """
 意图分类器模块
-使用大语言模型对用户输入进行意图分类
+使用 LLM 将用户输入分类，决定后续路由:
+
+  medical_inquiry → MedicalChatbot (RAG)
+  chat_general   → ToolManager (天气/闲聊)
+  system_query   → ToolManager (通用 LLM)
+  unknown        → 兜底走 RAG
 """
 import json
 from langchain_ollama import OllamaLLM
@@ -10,24 +15,24 @@ from src.utils.logger_config import logger
 
 class IntentClassifier:
     """
-    意图分类器
-    使用大语言模型对用户输入进行意图分类
+    基于 LLM 的意图分类器
+
+    设计思路:
+      用结构化 Prompt + JSON Schema 引导 LLM 输出固定格式，
+      避免训练专用分类模型的开销。
     """
 
     def __init__(self, model_name: str = "qwen2.5:7b"):
         """
-        初始化意图分类器
-
         Args:
-            model_name: 使用的LLM模型名称
+            model_name: 使用的 LLM 模型名，与 RAG 链共用同一实例
         """
         self.llm = OllamaLLM(
             model=model_name,
             base_url=APP_CONFIG.llm_base_url,
-            # temperature=0.0 用于分类任务，追求确定性
         )
 
-        # 定义意图类别（可根据项目需求修改）
+        # 分类 Schema — 意图新增/修改只需在此处调整
         self.intent_schema = {
             "intents": [
                 {
@@ -50,15 +55,14 @@ class IntentClassifier:
 
     def classify(self, query: str) -> str:
         """
-        对用户输入进行意图分类
+        意图分类主入口
 
-        Args:
-            query: 用户输入的查询文本
+        流程:
+          Prompt 构造 → LLM 调用 → JSON 解析 → 返回意图名
 
         Returns:
-            str: 分类结果，可能的值包括 'medical_inquiry', 'chat_general', 'system_query', 'unknown'
+            'medical_inquiry' | 'chat_general' | 'system_query' | 'unknown'
         """
-        # 设计一个结构化的 Prompt，要求模型返回 JSON
         prompt = f"""
         你是一个意图分类器。请严格分析用户的输入，并从预定义的 Schema 中选择最匹配的一个意图。
         请只返回 JSON 对象，不要包含任何其他解释文字。
@@ -87,7 +91,6 @@ class IntentClassifier:
 
         try:
             result = self.llm.invoke(prompt)
-            # 解析 JSON (这里简单处理，实际项目中建议用更健壮的 JSON 解析)
             json_start = result.find("{")
             json_end = result.rfind("}") + 1
             if json_start != -1 and json_end != -1:
