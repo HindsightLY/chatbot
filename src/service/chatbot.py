@@ -7,6 +7,7 @@
     → medical_inquiry → MedicalChatbot.get_answer()  [本模块]
     → chat_general   → ToolManager                   [tool_manager.py]
 """
+from operator import itemgetter
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
 from langchain_core.documents import Document
@@ -31,7 +32,7 @@ class HybridChatMemory:
         self.persist_dir = persist_dir
         self.max_cache_turns = 10
         self.embedding = OllamaEmbeddings(
-            model=APP_CONFIG.llm_model_name,
+            model=APP_CONFIG.embedding_model_name,
             base_url=APP_CONFIG.llm_base_url
         )
         self._init_faiss_store()
@@ -57,8 +58,12 @@ class HybridChatMemory:
 
     def _create_empty_vector_store(self):
         """创建空的 FAISS 向量库（FAISS 要求至少有一条记录）"""
-        empty_doc = Document(page_content="empty", metadata={"session_id": "system"})
-        return FAISS.from_documents([empty_doc], self.embedding)
+        try:
+            empty_doc = Document(page_content="empty", metadata={"session_id": "system"})
+            return FAISS.from_documents([empty_doc], self.embedding)
+        except Exception as e:
+            logger.error(f"❌ 创建空向量库失败: {e}")
+            raise
 
     def _format_dialogue(self, human_msg, ai_msg, session_id):
         """构造可向量化的对话记录"""
@@ -90,23 +95,26 @@ class HybridChatMemory:
             self._save_to_faiss(session_id, old_dialogue["human"], old_dialogue["ai"])
 
     def _save_to_faiss(self, session_id, human_msg, ai_msg):
-        """将对话持久化到 FAISS 并同步到磁盘"""
-        formatted = self._format_dialogue(human_msg, ai_msg, session_id)
-        doc = Document(
-            page_content=formatted["combined"],
-            metadata={
-                "session_id": session_id,
-                "timestamp": formatted["timestamp"],
-                "human": human_msg,
-                "ai": ai_msg
-            }
-        )
+        """将对话持久化到 FAISS 并同步到磁盘（失败不影响内存缓存）"""
+        try:
+            formatted = self._format_dialogue(human_msg, ai_msg, session_id)
+            doc = Document(
+                page_content=formatted["combined"],
+                metadata={
+                    "session_id": session_id,
+                    "timestamp": formatted["timestamp"],
+                    "human": human_msg,
+                    "ai": ai_msg
+                }
+            )
 
-        self.vector_store.add_documents([doc])
+            self.vector_store.add_documents([doc])
 
-        index_path = os.path.join(self.persist_dir, "index")
-        self.vector_store.save_local(index_path)
-        logger.info(f"💾 保存对话历史到FAISS，当前总数: {self.vector_store.index.ntotal}")
+            index_path = os.path.join(self.persist_dir, "index")
+            self.vector_store.save_local(index_path)
+            logger.info(f"💾 保存对话历史到FAISS，当前总数: {self.vector_store.index.ntotal}")
+        except Exception as e:
+            logger.warning(f"⚠️ 对话历史持久化失败（对话仍保留在内存）: {e}")
 
     def get_relevant_history(self, session_id, current_query, k=3):
         """
@@ -150,7 +158,7 @@ class HybridChatMemory:
 
             return relevant_dialogues
         except Exception as e:
-            logger.info(f"🔍 搜索历史对话失败: {e}")
+            logger.warning(f"🔍 搜索历史对话失败（不影响主流程）: {e}")
             return []
 
     def _format_history_for_prompt(self, history_list):
@@ -225,8 +233,8 @@ class MedicalChatbot:
 
         # LCEL 管道: dict → prompt → llm
         self.qa_chain = {
-                            "context": self.retriever,
-                            "input": lambda x: x["input"],
+                            "context": itemgetter("input") | self.retriever,
+                            "input": itemgetter("input"),
                             "relevant_history": lambda x: self.hybrid_memory.get_relevant_history(
                                 x["session_id"],
                                 x["input"]
@@ -254,7 +262,7 @@ class MedicalChatbot:
             return {"answer": answer}
 
         except Exception as e:
-            logger.error(f"获取答案失败: {e}")
+            logger.exception(f"获取答案失败")
             return {"answer": "抱歉，我暂时无法回答这个问题。"}
 
     def ask_stream(self, question, session_id="default"):

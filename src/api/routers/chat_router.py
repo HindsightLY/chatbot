@@ -3,18 +3,19 @@
 FastAPI 路由层，负责请求分发
 
 路由策略（意图驱动）:
-  POST /api/chat        — 普通问答
-  POST /api/chat/stream — SSE 流式问答
+  POST /api/chat        — 普通问答（JSON 响应）
+  POST /api/chat/stream — SSE 流式问答（逐字符输出）
   POST /api/chat/daily_news — 新闻查询
 
-核心分发逻辑:
-  intent_classifier.classify()
-    ├─ medical_inquiry → MedicalChatbot.get_answer()
-    ├─ chat_general    → ToolManager (天气/闲聊)
-    ├─ system_query    → ToolManager.handle_general_query()
-    └─ unknown         → 兜底 RAG
+SSE 协议格式:
+  data: {"intent":"medical_inquiry"}\n\n     ← 首个事件：意图
+  data: "你"\n\n                              ← 每字符一个事件，JSON 编码
+  data: "好"\n\n
+  data: [DONE]\n\n                            ← 终止信号
 """
+import json
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from config.app_config import APP_CONFIG
 from src.tools.news_tool import get_daily_news, NewsResponse, NewsRequest
@@ -41,11 +42,7 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 @router.post("", response_model=ChatResponse)
 async def api_chat(request: ChatRequest):
-    """
-    普通问答接口
-
-    流程: 意图分类 → 路由 → 调用对应处理器 → 返回结果
-    """
+    """非流式问答（单次 JSON 响应）"""
     intent_classifier = system_initializer.intent_classifier
     chatbot = system_initializer.chatbot
 
@@ -62,16 +59,13 @@ async def api_chat(request: ChatRequest):
         if intent == "medical_inquiry":
             result = chatbot.get_answer(user_input, session_id)
             answer = result.get('answer', '抱歉，我没有找到相关信息。')
-
         elif intent == "chat_general":
             if is_weather_query(user_input):
                 answer = tool_manager.get_weather_response(user_input)
             else:
                 answer = tool_manager.handle_general_query(user_input)
-
         elif intent == "system_query":
             answer = tool_manager.handle_general_query(user_input)
-
         else:
             result = chatbot.get_answer(user_input, session_id)
             answer = result.get('answer', '抱歉，我没有找到相关信息。')
@@ -83,16 +77,32 @@ async def api_chat(request: ChatRequest):
         raise HTTPException(status_code=500, detail=f"处理请求时发生错误: {str(e)}")
 
 
+def _get_answer(intent: str, user_input: str, session_id: str) -> str:
+    """根据意图获取完整答案文本（同步阻塞）"""
+    chatbot = system_initializer.chatbot
+    if intent == "medical_inquiry":
+        return chatbot.get_answer(user_input, session_id)["answer"]
+    elif intent == "chat_general":
+        if is_weather_query(user_input):
+            return tool_manager.get_weather_response(user_input)
+        return tool_manager.handle_general_query(user_input)
+    elif intent == "system_query":
+        return tool_manager.handle_general_query(user_input)
+    else:
+        return chatbot.get_answer(user_input, session_id)["answer"]
+
+
 @router.post("/stream")
 async def api_chat_stream(request: ChatRequest):
     """
-    SSE 流式问答接口
+    SSE 流式问答
 
-    注意: 当前所有处理器均为同步阻塞调用，返回后才逐字符 yield，
-    并非真正的流式生成。未来可替换为 llm.stream() 实现逐 token 输出。
+    SSE 事件序列:
+      1. data: {"intent":"<类型>"}
+      2. data: "<字符>"   (每字符一个)
+      ...
+      N. data: [DONE]
     """
-    from fastapi.responses import StreamingResponse
-
     intent_classifier = system_initializer.intent_classifier
     chatbot = system_initializer.chatbot
 
@@ -102,32 +112,21 @@ async def api_chat_stream(request: ChatRequest):
     user_input = request.query
     session_id = request.session_id
 
-    intent = intent_classifier.classify(user_input)
-
-    async def generate_response():
+    async def event_stream():
         try:
-            if intent == "medical_inquiry":
-                for char in chatbot.ask_stream(user_input, session_id=session_id):
-                    if char:
-                        yield char
-            elif intent == "chat_general":
-                if is_weather_query(user_input):
-                    response = tool_manager.get_weather_response(user_input)
-                else:
-                    response = tool_manager.handle_general_query(user_input)
-                for char in response:
-                    yield char
-            else:
-                for char in chatbot.ask_stream(user_input, session_id=session_id):
-                    if char:
-                        yield char
+            intent = intent_classifier.classify(user_input)
+            yield f"data: {json.dumps({'intent': intent}, ensure_ascii=False)}\n\n"
 
-            yield "[DONE]"
+            answer = _get_answer(intent, user_input, session_id)
+            for char in answer:
+                yield f"data: {json.dumps(char, ensure_ascii=False)}\n\n"
 
+            yield "data: [DONE]\n\n"
         except Exception as e:
-            yield f"Error: {str(e)}"
+            logger.error(f"流式处理错误: {e}")
+            yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
 
-    return StreamingResponse(generate_response(), media_type="text/event-stream")
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @router.post("/daily_news", response_model=NewsResponse)

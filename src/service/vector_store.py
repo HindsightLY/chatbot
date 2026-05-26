@@ -77,7 +77,7 @@ class VectorStoreManager:
                 logger.info(f"📁 向量库目录不存在或为空: {self.persist_dir}")
                 return None
         except Exception as e:
-            logger.error(f"❌ 加载向量库失败: {e}")
+            logger.exception(f"❌ 加载向量库失败")
             return None
 
     def create_vector_store(self, documents: List[Document]) -> FAISS:
@@ -112,7 +112,7 @@ class VectorStoreManager:
             return vector_store
 
         except Exception as e:
-            logger.error(f"❌ 创建向量库失败: {e}")
+            logger.exception(f"❌ 创建向量库失败")
             raise
 
     def similarity_search(self, query: str, k: int = None,
@@ -153,7 +153,7 @@ class VectorStoreManager:
             return filtered_results
 
         except Exception as e:
-            logger.error(f"❌ 搜索失败: {e}")
+            logger.exception(f"❌ 搜索失败（query前50字: {query[:50]}）")
             return []
 
     def get_retriever(self, k: int = None, score_threshold: float = None):

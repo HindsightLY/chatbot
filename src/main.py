@@ -2,18 +2,22 @@
 主应用入口
 
 两种运行模式:
-  python main.py --api   → FastAPI 服务 (默认)
+  python main.py --api   → FastAPI 服务 (默认，自动打开浏览器)
   python main.py         → CLI 交互界面
 
 启动流程:
   1. 确保数据目录存在 (ensure_data_dirs)
-  2. 创建 FastAPI 实例并注册路由
-  3. API 模式: uvicorn 启动，startup 事件中初始化系统组件
+  2. 创建 FastAPI 实例并注册路由、挂载静态文件
+  3. API 模式: uvicorn 启动 → startup 事件初始化系统组件 → 自动打开页面
   4. CLI 模式: run_cli() 直接触发初始化
 """
+import webbrowser
+import threading
 import uvicorn
 import argparse
+from pathlib import Path
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from src.utils.logger_config import logger
 from config.app_config import APP_CONFIG
 from src.api.routers.cli_router import run_cli
@@ -29,6 +33,10 @@ app = FastAPI(
 
 app.include_router(chat_router)
 
+static_dir = Path(__file__).parent / "static"
+if static_dir.is_dir():
+    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
+
 
 @app.on_event("startup")
 def startup_event():
@@ -40,15 +48,25 @@ def startup_event():
     logger.info(f"📁 文档数据位置: {APP_CONFIG.disease_dir}")
 
 
+def open_browser(host: str, port: int):
+    """延迟打开浏览器，等待服务器就绪"""
+    import time
+    time.sleep(1.5)
+    url = f"http://{host if host != '0.0.0.0' else '127.0.0.1'}:{port}"
+    webbrowser.open(url)
+    logger.info(f"🌐 浏览器已打开: {url}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="医疗咨询AI启动器")
     parser.add_argument("--api", action="store_true", help="以 API 模式启动 (FastAPI)")
     parser.add_argument("--host", default=APP_CONFIG.api_host, help="API 监听地址")
     parser.add_argument("--port", type=int, default=APP_CONFIG.api_port, help="API 监听端口")
 
-    args = parser.parse_args()
+    args = parser.parse_args(['--api'])
 
     if args.api:
+        threading.Thread(target=open_browser, args=(args.host, args.port), daemon=True).start()
         uvicorn.run(app, host=args.host, port=args.port, reload=False)
     else:
         run_cli()
