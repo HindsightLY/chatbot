@@ -4,8 +4,11 @@
 
 调用链:
   intent_classifier.classify() → 判定意图
-    → medical_inquiry   → MedicalAgent (RAG)
-    → chat_general      → ToolManager / MedicalAgent
+    → medical_inquiry   → MedicalAgent (RAG, 带对话历史)
+    → chat_general      → MedicalAgent (闲聊/天气, 均带对话历史)
+
+多轮记忆: 所有意图分支在生成回答前均会从 Redis 拉取历史，
+  确保用户之前提到的信息（姓名、症状等）可被后续轮次引用。
 """
 from src.service.agent import MedicalAgent
 from src.utils.logger_config import logger

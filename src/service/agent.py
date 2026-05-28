@@ -8,6 +8,11 @@ LangGraph 智能体模块
     ├─ chat_general+天气 → weather_query → save_memory
     ├─ chat_general/other → general_chat → save_memory
     └─ unknown → retrieve_docs (兜底 RAG)
+
+关键设计: 所有分支（RAG / 闲聊 / 天气）在构造 prompt 时均注入对话历史
+  self.prompt          → {history} + {context} + {input}   (RAG)
+  self.general_prompt  → {history} + {input}               (闲聊 / 天气)
+  确保多轮对话中用户提到的信息（如姓名、症状等）可被后续轮次引用
 """
 from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
@@ -73,6 +78,18 @@ class MedicalAgent:
 请直接给出清晰、专业的回答，分点说明可能疾病、症状关联与建议。"""
         )
 
+        self.general_prompt = PromptTemplate.from_template(
+            """你是一个友好的AI助手。请根据以下对话历史和当前问题，回答用户的问题。
+
+【对话历史】
+{history}
+
+【当前问题】
+{input}
+
+请直接回答用户的问题，语言亲切自然。"""
+        )
+
         self.graph = self._build_graph()
 
     # ────────── 节点函数 ──────────
@@ -129,24 +146,35 @@ class MedicalAgent:
             return {**state, "answer": "抱歉，我暂时无法回答这个问题。"}
 
     def _weather_query(self, state: AgentState) -> AgentState:
-        """节点: 天气查询"""
+        """节点: 天气查询 — 带对话历史的润色输出"""
         messages = state["messages"]
         query = messages[-1]["content"] if messages else ""
+        history = self.memory_store.get_history_text(state["session_id"])
 
         try:
-            answer = self.tool_manager.get_weather_response(query)
+            weather_data = self.tool_manager.get_weather_response(query)
+            formatted_prompt = self.general_prompt.format(
+                history=history,
+                input=f"用户问天气：{query}\n天气数据：{weather_data}"
+            )
+            answer = self.llm.invoke(formatted_prompt)
             return {**state, "answer": answer}
         except Exception as e:
             logger.exception(f"❌ 天气查询失败")
             return {**state, "answer": "获取天气信息失败，请稍后再试。"}
 
     def _general_chat(self, state: AgentState) -> AgentState:
-        """节点: 通用闲聊/系统查询"""
+        """节点: 通用闲聊/系统查询 — 带对话历史的完整上下文"""
         messages = state["messages"]
         query = messages[-1]["content"] if messages else ""
+        history = self.memory_store.get_history_text(state["session_id"])
 
         try:
-            answer = self.tool_manager.handle_general_query(query)
+            formatted_prompt = self.general_prompt.format(
+                history=history,
+                input=query
+            )
+            answer = self.llm.invoke(formatted_prompt)
             return {**state, "answer": answer}
         except Exception as e:
             logger.exception(f"❌ 通用对话失败")
@@ -247,6 +275,9 @@ class MedicalAgent:
         """
         流式推理入口，逐 token 产出，无需等待 LLM 完全生成
 
+        所有分支在生成 prompt 前均从 Redis 拉取对话历史，
+        确保多轮记忆（姓名、既往症状等）被带入当前上下文。
+
         Yields:
             {"type": "intent", "content": str}  — 意图事件（第一个发出）
             {"type": "token",  "content": str}  — LLM 输出片段
@@ -290,15 +321,23 @@ class MedicalAgent:
                     yield {"type": "token", "content": token}
 
             elif intent == "chat_general" and is_weather_query(user_input):
-                answer = self.tool_manager.get_weather_response(user_input)
-                full_answer = answer
-                yield {"type": "token", "content": answer}
+                history_text = self.memory_store.get_history_text(session_id)
+                weather_data = self.tool_manager.get_weather_response(user_input)
+                weather_prompt = self.general_prompt.format(
+                    history=history_text,
+                    input=f"用户问天气：{user_input}\n天气数据：{weather_data}"
+                )
+                for token in self.llm.stream(weather_prompt):
+                    full_answer += token
+                    yield {"type": "token", "content": token}
 
             elif intent == "chat_general" or intent == "system_query":
-                for token in self.llm.stream(
-                    f"你是一个友好的AI助手。用户向你提问：{user_input}\n"
-                    f"请直接回答用户的问题，语言亲切自然。"
-                ):
+                history_text = self.memory_store.get_history_text(session_id)
+                general_prompt = self.general_prompt.format(
+                    history=history_text,
+                    input=user_input
+                )
+                for token in self.llm.stream(general_prompt):
                     full_answer += token
                     yield {"type": "token", "content": token}
 
