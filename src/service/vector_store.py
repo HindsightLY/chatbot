@@ -1,12 +1,12 @@
 """
 向量存储管理模块
-负责 FAISS 向量库的创建、加载、持久化和检索
+负责 ChromaDB 向量库的创建、加载、持久化和检索
 
-使用 nomic-embed-text 通过 Ollama 生成文本嵌入。
+使用 nomic-embed-text 通过 Ollama 生成文本嵌入，存入 ChromaDB。
 """
 import os
 from typing import List, Optional
-from langchain_community.vectorstores import FAISS
+from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
 from langchain_core.documents import Document
 from src.utils.logger_config import logger
@@ -18,7 +18,7 @@ class VectorStoreManager:
     向量存储管理器
 
     职责:
-      - 创建/加载 FAISS 索引
+      - 创建/加载 ChromaDB 集合
       - 将文档向量化并持久化到磁盘
       - 提供相似度搜索接口
 
@@ -28,14 +28,14 @@ class VectorStoreManager:
     def __init__(self, persist_dir: str = None):
         """
         Args:
-            persist_dir: 持久化目录，默认使用 APP_CONFIG.vector_persist_dir
+            persist_dir: ChromaDB 持久化目录，默认使用 APP_CONFIG.chroma_persist_dir
         """
-        self.persist_dir = persist_dir if persist_dir is not None else APP_CONFIG.vector_persist_dir
+        self.persist_dir = persist_dir if persist_dir is not None else APP_CONFIG.chroma_persist_dir
         self.embedding = self._create_embedding_model()
 
         os.makedirs(self.persist_dir, exist_ok=True)
 
-        logger.info(f"📁 向量存储目录: {self.persist_dir}")
+        logger.info(f"📁 ChromaDB 存储目录: {self.persist_dir}")
 
         self._vector_store = None
 
@@ -48,7 +48,7 @@ class VectorStoreManager:
 
     def _create_embedding_model(self) -> OllamaEmbeddings:
         """
-        嵌入式模型与 chatbot.py 中 HybridChatMemory 使用的是同一模型，
+        嵌入式模型与 agent.py 中使用的是同一模型，
         确保检索和记忆的向量空间一致。
         """
         return OllamaEmbeddings(
@@ -56,39 +56,41 @@ class VectorStoreManager:
             base_url=APP_CONFIG.llm_base_url
         )
 
-    def load_vector_store(self) -> Optional[FAISS]:
+    def load_vector_store(self) -> Optional[Chroma]:
         """
-        尝试从 persist_dir 加载已有的 FAISS 索引
+        从 persist_dir 加载已有的 ChromaDB 集合
 
         Returns:
-            FAISS 实例，目录不存在或加载失败时返回 None
+            Chroma 实例，目录不存在或加载失败时返回 None
         """
         try:
             if os.path.exists(self.persist_dir) and os.listdir(self.persist_dir):
-                logger.info(f"🔄 尝试加载向量库从: {self.persist_dir}")
-                vector_store = FAISS.load_local(
-                    self.persist_dir,
-                    self.embedding,
-                    allow_dangerous_deserialization=True
+                logger.info(f"🔄 尝试加载 ChromaDB 从: {self.persist_dir}")
+                vector_store = Chroma(
+                    persist_directory=self.persist_dir,
+                    embedding_function=self.embedding,
+                    collection_name=APP_CONFIG.chroma_collection_name
                 )
-                logger.info(f"✅ 成功加载向量库，包含 {vector_store.index.ntotal} 个向量")
+                count = vector_store._collection.count()
+                logger.info(f"✅ 成功加载 ChromaDB，包含 {count} 个文档")
+                self._vector_store = vector_store
                 return vector_store
             else:
-                logger.info(f"📁 向量库目录不存在或为空: {self.persist_dir}")
+                logger.info(f"📁 ChromaDB 目录不存在或为空: {self.persist_dir}")
                 return None
         except Exception as e:
-            logger.exception(f"❌ 加载向量库失败")
+            logger.exception(f"❌ 加载 ChromaDB 失败")
             return None
 
-    def create_vector_store(self, documents: List[Document]) -> FAISS:
+    def create_vector_store(self, documents: List[Document]) -> Chroma:
         """
-        用文档列表创建 FAISS 索引并持久化
+        用文档列表创建 ChromaDB 集合并持久化
 
         Args:
             documents: DocumentLoader 分块后的 Document 列表
 
         Returns:
-            FAISS 实例
+            Chroma 实例
 
         Raises:
             ValueError: documents 为空
@@ -96,23 +98,25 @@ class VectorStoreManager:
         if not documents:
             raise ValueError("文档列表为空，无法创建向量库")
 
-        logger.info(f"🔄 开始创建向量库，文档数量: {len(documents)}")
+        logger.info(f"🔄 开始创建 ChromaDB，文档数量: {len(documents)}")
 
         try:
-            vector_store = FAISS.from_documents(
-                documents,
-                self.embedding,
-                normalize_L2=True
+            vector_store = Chroma.from_documents(
+                documents=documents,
+                embedding=self.embedding,
+                persist_directory=self.persist_dir,
+                collection_name=APP_CONFIG.chroma_collection_name
             )
 
-            vector_store.save_local(self.persist_dir)
-            logger.info(f"✅ 向量库创建成功并保存到: {self.persist_dir}")
-            logger.info(f"📊 向量库统计: 总向量数 = {vector_store.index.ntotal}")
+            count = vector_store._collection.count()
+            logger.info(f"✅ ChromaDB 创建成功并保存到: {self.persist_dir}")
+            logger.info(f"📊 ChromaDB 统计: 总文档数 = {count}")
 
+            self._vector_store = vector_store
             return vector_store
 
         except Exception as e:
-            logger.exception(f"❌ 创建向量库失败")
+            logger.exception(f"❌ 创建 ChromaDB 失败")
             raise
 
     def similarity_search(self, query: str, k: int = None,
@@ -135,7 +139,7 @@ class VectorStoreManager:
 
         vector_store = self._vector_store
         if not vector_store:
-            logger.warning("⚠️ 向量库未加载，无法执行搜索")
+            logger.warning("⚠️ ChromaDB 未加载，无法执行搜索")
             return []
 
         try:
@@ -160,7 +164,7 @@ class VectorStoreManager:
         """
         获取 LangChain Retriever 对象，可嵌入 LCEL 管道
 
-        目前未被直接使用，MedicalChatbot 自行创建 retriever。
+        目前未被直接使用，MedicalChatbot 自行从 vector_store 创建 retriever。
         """
         vector_store = self._vector_store
         if not vector_store:

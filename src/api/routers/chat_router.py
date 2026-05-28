@@ -4,16 +4,18 @@ FastAPI 路由层，负责请求分发
 
 路由策略（意图驱动）:
   POST /api/chat        — 普通问答（JSON 响应）
-  POST /api/chat/stream — SSE 流式问答（逐字符输出）
+  POST /api/chat/stream — SSE 流式问答（逐 token 推送）
   POST /api/chat/daily_news — 新闻查询
 
 SSE 协议格式:
   data: {"intent":"medical_inquiry"}\n\n     ← 首个事件：意图
-  data: "你"\n\n                              ← 每字符一个事件，JSON 编码
-  data: "好"\n\n
-  data: [DONE]\n\n                            ← 终止信号
+  data: "\u4f60"\n\n                         ← 逐 token，JSON 编码
+  data: "\u597d"\n\n
+  data: [DONE]\n\n                           ← 终止信号
 """
+import asyncio
 import json
+from functools import partial
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -77,33 +79,17 @@ async def api_chat(request: ChatRequest):
         raise HTTPException(status_code=500, detail=f"处理请求时发生错误: {str(e)}")
 
 
-def _get_answer(intent: str, user_input: str, session_id: str) -> str:
-    """根据意图获取完整答案文本（同步阻塞）"""
-    chatbot = system_initializer.chatbot
-    if intent == "medical_inquiry":
-        return chatbot.get_answer(user_input, session_id)["answer"]
-    elif intent == "chat_general":
-        if is_weather_query(user_input):
-            return tool_manager.get_weather_response(user_input)
-        return tool_manager.handle_general_query(user_input)
-    elif intent == "system_query":
-        return tool_manager.handle_general_query(user_input)
-    else:
-        return chatbot.get_answer(user_input, session_id)["answer"]
-
-
 @router.post("/stream")
 async def api_chat_stream(request: ChatRequest):
     """
-    SSE 流式问答
+    SSE 流式问答（真·流式，逐 token 推送）
 
     SSE 事件序列:
       1. data: {"intent":"<类型>"}
-      2. data: "<字符>"   (每字符一个)
+      2. data: "<token>"   (逐 token)
       ...
       N. data: [DONE]
     """
-    intent_classifier = system_initializer.intent_classifier
     chatbot = system_initializer.chatbot
 
     if not chatbot:
@@ -113,13 +99,29 @@ async def api_chat_stream(request: ChatRequest):
     session_id = request.session_id
 
     async def event_stream():
-        try:
-            intent = intent_classifier.classify(user_input)
-            yield f"data: {json.dumps({'intent': intent}, ensure_ascii=False)}\n\n"
+        loop = asyncio.get_event_loop()
+        gen = chatbot.ask_stream(user_input, session_id)
 
-            answer = _get_answer(intent, user_input, session_id)
-            for char in answer:
-                yield f"data: {json.dumps(char, ensure_ascii=False)}\n\n"
+        async def _next():
+            return await loop.run_in_executor(None, partial(next, gen))
+
+        try:
+            while True:
+                try:
+                    event = await _next()
+                except StopIteration:
+                    break
+
+                if event["type"] == "intent":
+                    yield f"data: {json.dumps({'intent': event['content']}, ensure_ascii=False)}\n\n"
+                elif event["type"] == "token":
+                    yield f"data: {json.dumps(event['content'], ensure_ascii=False)}\n\n"
+                elif event["type"] == "done":
+                    break
+                elif event["type"] == "error":
+                    logger.error(f"流式处理错误: {event['content']}")
+                    yield f"data: {json.dumps({'error': event['content']}, ensure_ascii=False)}\n\n"
+                    break
 
             yield "data: [DONE]\n\n"
         except Exception as e:

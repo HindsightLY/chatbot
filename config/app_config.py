@@ -3,15 +3,17 @@
 基于 Pydantic BaseModel，集中管理所有可调参数
 
 全局单例 APP_CONFIG 被以下模块引用:
-  - chatbot.py      (LLM / 嵌入模型 / 检索参数)
-  - vector_store.py (持久化路径 / 嵌入模型)
+  - chatbot.py         (LLM / 嵌入模型 / 检索参数)
+  - vector_store.py    (持久化路径 / ChromaDB / 嵌入模型)
+  - memory_store.py    (Redis 连接)
   - document_loader.py (分块参数)
   - intent_classifier.py (LLM)
-  - tool_manager.py (LLM)
-  - weather_tool.py (高德 API)
-  - news_tool.py    (新闻类型)
-  - chat_router.py  (新闻类型)
-  - text_utils.py   (城市列表)
+  - tool_manager.py    (LLM)
+  - agent.py           (LangGraph 节点)
+  - weather_tool.py    (高德 API)
+  - news_tool.py       (新闻类型)
+  - chat_router.py     (新闻类型)
+  - text_utils.py      (城市列表)
 
 所有敏感信息（API Key 等）应迁移至环境变量。
 """
@@ -28,7 +30,7 @@ class AppConfig(BaseModel):
     # 数据目录
     data_dir: str = os.path.join(project_root, "data")
     disease_dir: str = os.path.join(data_dir, "disease")
-    vector_persist_dir: str = os.path.join(data_dir, "faiss_index")
+    chroma_persist_dir: str = os.path.join(data_dir, "chroma_db")
 
     # LLM — 用于 RAG 生成 & 意图分类 & 闲聊
     llm_model_name: str = "qwen2.5:7b"
@@ -49,6 +51,15 @@ class AppConfig(BaseModel):
     # 文档分块
     chunk_size: int = 500
     chunk_overlap: int = 100
+
+    # Redis 对话记忆
+    redis_host: str = "127.0.0.1"
+    redis_port: int = 6379
+    redis_db: int = 0
+    redis_ttl: int = 86400  # 24 小时过期
+
+    # ChromaDB 集合名
+    chroma_collection_name: str = "medical_docs"
 
     # 城市列表（天气查询用）
     common_cities: list = [
@@ -71,8 +82,8 @@ class AppConfig(BaseModel):
     ]
 
     def ensure_data_dirs(self):
-        """创建 data/disease/faiss_index 目录（首次运行必需）"""
-        for attr in ["data_dir", "disease_dir", "vector_persist_dir"]:
+        """创建 data/disease/chroma_db 目录（首次运行必需）"""
+        for attr in ["data_dir", "disease_dir", "chroma_persist_dir"]:
             path = getattr(self, attr)
             if not os.path.exists(path):
                 os.makedirs(path)

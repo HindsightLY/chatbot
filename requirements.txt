@@ -3,14 +3,20 @@ fastapi~=0.136.0
 uvicorn~=0.44.0
 pydantic~=2.13.2
 
-# LangChain生态系统（按需拆分，主包由 community 传递引入）
+# LangChain 生态
 langchain-core~=1.3.0
-langchain-community~=0.4.1
 langchain-text-splitters~=1.1.2
 langchain-ollama~=1.1.0
+langchain-chroma~=1.1.0
 
 # 向量存储
-faiss-cpu~=1.13.2
+chromadb~=1.5.9
+
+# 对话记忆
+redis~=7.4.0
+
+# Agent 框架
+langgraph~=0.5.0
 
 # HTTP 工具
 requests~=2.33.0

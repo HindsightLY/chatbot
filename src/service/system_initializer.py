@@ -3,16 +3,22 @@
 负责按依赖顺序组装系统核心组件
 
 初始化顺序（有严格依赖关系）:
-  1. VectorStoreManager   — 向量库（无依赖）
-  2. IntentClassifier     — 意图分类器（无依赖，仅需 LLM）
-  3. MedicalChatbot       — 聊天机器人（依赖 vector_store）
+  1. VectorStoreManager   — ChromaDB 向量库（无依赖）
+  2. MemoryStore          — Redis 对话记忆（无依赖）
+  3. IntentClassifier     — 意图分类器（无依赖，仅需 LLM）
+  4. ToolManager          — 工具管理器（无依赖）
+  5. MedicalAgent         — LangGraph Agent（依赖 1/2/3/4）
+  6. MedicalChatbot       — 聊天机器人（依赖 5）
 """
 from typing import Tuple
 from src.utils.logger_config import logger
 from config.app_config import APP_CONFIG
 from src.service.document_loader import DocumentLoader
 from src.service.vector_store import VectorStoreManager
+from src.service.memory_store import MemoryStore
 from src.service.intent_classifier import IntentClassifier
+from src.service.tool_manager import ToolManager
+from src.service.agent import MedicalAgent
 from src.service.chatbot import MedicalChatbot
 
 
@@ -26,7 +32,10 @@ class SystemInitializer:
 
     def __init__(self):
         self.vector_store = None
+        self.memory_store = None
         self.intent_classifier = None
+        self.tool_manager = None
+        self.agent = None
         self.chatbot = None
 
     def initialize_system(self) -> Tuple[object, object, object]:
@@ -43,10 +52,13 @@ class SystemInitializer:
         logger.info(f"📁 项目根目录: {APP_CONFIG.project_root}")
         logger.info(f"📁 数据目录: {APP_CONFIG.data_dir}")
         logger.info(f"📁 疾病文档目录: {APP_CONFIG.disease_dir}")
-        logger.info(f"📁 向量索引目录: {APP_CONFIG.vector_persist_dir}")
+        logger.info(f"📁 ChromaDB 索引目录: {APP_CONFIG.chroma_persist_dir}")
 
         self.vector_store = self._initialize_vector_store()
+        self.memory_store = self._initialize_memory_store()
         self.intent_classifier = self._initialize_intent_classifier()
+        self.tool_manager = self._initialize_tool_manager()
+        self.agent = self._initialize_agent()
         self.chatbot = self._initialize_chatbot()
 
         logger.info("✅ 系统初始化完成！")
@@ -55,14 +67,14 @@ class SystemInitializer:
 
     def _initialize_vector_store(self):
         """
-        初始化向量存储:
+        初始化 ChromaDB 向量存储:
           存在缓存 → 直接加载
-          不存在    → 从文档目录加载文件 → 分块 → 创建 FAISS 索引
+          不存在    → 从文档目录加载文件 → 分块 → 创建 Chroma 集合
         """
-        logger.info("📦 初始化向量存储...")
+        logger.info("📦 初始化 ChromaDB 向量存储...")
 
         vector_manager = VectorStoreManager()
-        store = vector_manager.load_vector_store()
+        store = vector_manager.vector_store
 
         if store is None:
             logger.info("🔄 未找到现有向量库，正在创建新的向量存储...")
@@ -74,10 +86,19 @@ class SystemInitializer:
                 raise Exception("❌ 没有加载到任何文档，无法初始化向量存储")
 
             store = vector_manager.create_vector_store(documents)
-            logger.info("✅ 新向量存储创建完成！")
+            logger.info("✅ 新 ChromaDB 创建完成！")
         else:
-            logger.info("✅ 成功加载现有向量库！")
+            logger.info("✅ 成功加载现有 ChromaDB！")
 
+        # 返回 VectorStoreManager 而不是原始 Chroma 实例，
+        # 以便上游通过 .vector_store 属性访问
+        return vector_manager
+
+    def _initialize_memory_store(self):
+        """初始化 Redis 对话记忆存储"""
+        logger.info("💾 初始化 Redis 对话记忆...")
+        store = MemoryStore()
+        logger.info("✅ Redis 记忆存储初始化完成！")
         return store
 
     def _initialize_intent_classifier(self):
@@ -91,14 +112,37 @@ class SystemInitializer:
         logger.info("✅ 意图分类器初始化完成！")
         return classifier
 
+    def _initialize_tool_manager(self):
+        """初始化工具管理器"""
+        logger.info("🛠️ 初始化工具管理器...")
+        tm = ToolManager()
+        logger.info("✅ 工具管理器初始化完成！")
+        return tm
+
+    def _initialize_agent(self):
+        """
+        初始化 LangGraph Agent
+
+        依赖 vector_store / memory_store / intent_classifier / tool_manager 已就绪。
+        """
+        logger.info("🤖 初始化 LangGraph Agent...")
+        agent = MedicalAgent(
+            vector_store=self.vector_store,
+            memory_store=self.memory_store,
+            intent_classifier=self.intent_classifier,
+            tool_manager=self.tool_manager
+        )
+        logger.info("✅ Agent 初始化完成！")
+        return agent
+
     def _initialize_chatbot(self):
         """
         初始化聊天机器人
 
-        依赖 vector_store 已就绪，chatbot 内部再创建 HybridChatMemory。
+        依赖 agent 已就绪。
         """
-        logger.info("🤖 初始化聊天机器人...")
-        chatbot = MedicalChatbot(self.vector_store)
+        logger.info("💬 初始化聊天机器人...")
+        chatbot = MedicalChatbot(agent=self.agent)
         logger.info("✅ 聊天机器人初始化完成！")
         return chatbot
 

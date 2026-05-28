@@ -51,9 +51,12 @@ def run_cli():
         logger.info(f"\n🔍 识别意图: {intent}")
 
         try:
-            if intent == "medical_inquiry":
-                for char in chatbot.ask_stream(user_input, session_id=current_session_id):
-                    print(char, end="", flush=True)
+            if intent == "medical_inquiry" or intent == "unknown":
+                for event in chatbot.ask_stream(user_input, session_id=current_session_id):
+                    if event["type"] == "token":
+                        print(event["content"], end="", flush=True)
+                    elif event["type"] == "done":
+                        break
                 print()
             elif intent == "chat_general":
                 from src.service.tool_manager import tool_manager
@@ -63,8 +66,11 @@ def run_cli():
                     response = tool_manager.handle_general_query(user_input)
                 logger.info(f"AI: {response}")
             else:
-                for char in chatbot.ask_stream(user_input, session_id=current_session_id):
-                    print(char, end="", flush=True)
+                for event in chatbot.ask_stream(user_input, session_id=current_session_id):
+                    if event["type"] == "token":
+                        print(event["content"], end="", flush=True)
+                    elif event["type"] == "done":
+                        break
                 print()
 
         except Exception as e:

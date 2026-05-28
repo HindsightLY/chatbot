@@ -44,7 +44,7 @@ def startup_event():
     logger.info("🚀 正在初始化医疗AI系统...")
     system_initializer.initialize_system()
     logger.info("🎉 系统初始化完成，API 就绪！")
-    logger.info(f"📁 向量存储位置: {APP_CONFIG.vector_persist_dir}")
+    logger.info(f"📁 ChromaDB 存储位置: {APP_CONFIG.chroma_persist_dir}")
     logger.info(f"📁 文档数据位置: {APP_CONFIG.disease_dir}")
 
 
