@@ -58,8 +58,16 @@
 | LLM | `llm_temperature` | `0.1` | 低温度保证一致性 |
 | 嵌入 | `embedding_model_name` | `nomic-embed-text` | 768 维 |
 | 检索 | `retrieval_k` | `6` | Top-K |
-| 检索 | `retrieval_score_threshold` | `0.3` | 相关性过滤 |
-| 分块 | `chunk_size` / `chunk_overlap` | `500` / `100` | 字符级 |
+| 检索 | `retrieval_score_threshold` | `0.3` | 相关性过滤阈值 |
+| 检索 | `use_hybrid_search` | `True` | 启用混合检索 (BM25+Dense+RRF) |
+| 检索 | `hybrid_prefetch_k` | `20` | 混合检索预取数 |
+| 检索 | `rrf_k` | `60` | RRF 融合常数 |
+| 检索 | `use_reranking` | `True` | 启用 Cross-Encoder 重排序 |
+| 检索 | `rerank_top_k` | `6` | 重排序后取 Top-K |
+| 分块 | `chunk_size` / `chunk_overlap` | `500` / `100` | 固定分块参数（回退） |
+| 分块 | `use_semantic_chunking` | `True` | 启用语义分块 |
+| 分块 | `semantic_chunk_min_size` | `200` | 语义块最小字符数 |
+| 分块 | `semantic_chunk_max_size` | `800` | 语义块最大字符数 |
 | Redis | `redis_host` / `port` / `db` | `127.0.0.1:6379/0` | — |
 | Redis | `redis_ttl` | `86400` | 24h 自动过期 |
 | Chroma | `chroma_collection_name` | `medical_docs` | 集合名 |
@@ -74,26 +82,68 @@
 
 **职责**: 将 `data/disease/` 下的原始文本文件分块为语义完整的 Document 列表。
 
-**流程**:
+**分块策略（二选一）**:
+
+#### 语义分块（默认，推荐）
+
 ```
-扫描目录(*.txt/*.md/*.mdx)
-  → 逐文件读取(UTF-8)
-  → 构建 Document(保留 source/file_path/file_type 元数据)
-  → RecursiveCharacterTextSplitter
-      separators=["\n\n", "\n", "。", "！", "？", "；", " ", ""]
-  → 每块附加 chunk_index / total_chunks / chunk_size
+文本 → 预分句 (RecursiveCharacterTextSplitter, chunk_size=50)
+  → OllamaEmbeddings 逐句嵌入
+  → 计算相邻句余弦距离
+  → 在距离 > 百分位阈值处断开
+  → 合并为语义块 (min=200, max=800)
 ```
 
-**分块策略说明**:
-- 按中文标点符号逐级递归，保证句子不会被截断在词中间
-- 500 字符块大小在"上下文长度"和"粒度"之间取得平衡
-- 100 字符重叠保证跨块语义不丢失
+`SemanticChunker` 类实现:
+1. 先用极小单元(50字符)将文本拆为句子
+2. 用 `nomic-embed-text` 对每个句子编码为 768 维向量
+3. 计算相邻句之间的余弦距离矩阵
+4. 取距离的第 80 百分位作为断点阈值
+5. 低于阈值的相邻句合并为同一语义块
+6. 二次合并保证每块在 [200, 800] 字符范围内
+
+**优势**: 同一话题的句子被自然合并，话题切换处自动分段。
+
+#### 固定分块（回退）
+
+```
+RecursiveCharacterTextSplitter
+  separators=["\n\n", "\n", "。", "！", "？", "；", " ", ""]
+  chunk_size=500, chunk_overlap=100
+```
+
+当嵌入模型不可用时自动降级。
 
 ---
 
 ### 3. 向量存储 — `src/service/vector_store.py`
 
-**职责**: ChromaDB 创建、加载、检索。
+**职责**: ChromaDB 创建、加载、混合检索、重排序。
+
+**检索流水线**:
+
+```
+用户查询
+  │
+  ├─ Step 1: 稠密检索 (ChromaDB)
+  │     similarity_search_with_relevance_scores(query, k=20)
+  │     → 召回 Top-20 向量近邻
+  │
+  ├─ Step 2: 稀疏检索 (BM25)
+  │     jieba 分词 → BM25Okapi.get_scores()
+  │     → 召回 Top-20 关键词匹配
+  │
+  ├─ Step 3: RRF 融合
+  │     score = Σ 1/(rrf_k + rank)
+  │     → 合并去重得 20~40 个候选
+  │
+  ├─ Step 4: Cross-Encoder 重排序（可选）
+  │     cross-encoder/ms-marco-MiniLM-L-6-v2
+  │     → 对 (query, doc) 对逐一打分
+  │     → 按相关性得分降序排列
+  │
+  └─ Step 5: 返回 Top-K (k=6)
+```
 
 **关键设计**:
 
@@ -104,16 +154,29 @@ VectorStoreManager
   │
   ├── @property vector_store (懒加载)
   │     → load_vector_store() 从磁盘重建
-  │     → 若存在则返回 Chroma 实例，否则返回 None
+  │     → 成功则自动构建 BM25 索引
   │
   ├── create_vector_store(documents)
   │     → Chroma.from_documents() → 持久化到 data/chroma_db/
-  │     → collection_name = "medical_docs"
+  │     → 自动构建 BM25 索引
   │
-  └── similarity_search(query, k=6, score_threshold=0.3)
-        → similarity_search_with_relevance_scores()
-        → score_threshold 过滤低相关结果
+  ├── similarity_search(query, k=6, score_threshold=0.3)
+  │     → 纯稠密向量检索（兼容旧接口）
+  │
+  ├── hybrid_search(query, k=6)
+  │     → 混合检索 + 可选重排序（主入口）
+  │
+  └── @property reranker
+        → 懒加载 Cross-Encoder 模型
+        → 缺依赖时静默降级
 ```
+
+**BM25 索引**: 使用 `jieba` 中文分词 + `rank_bm25` 库，在 ChromaDB 创建/加载时自动构建，
+所有文档的文本内容被分词后存入倒排索引。
+
+**Cross-Encoder 重排序**: 使用 `sentence-transformers` 库加载
+`cross-encoder/ms-marco-MiniLM-L-6-v2` 模型。模型首次使用时自动下载。
+若 `sentence-transformers` 未安装，跳过重排序步骤（不影响主流程）。
 
 **为什么选 ChromaDB 而非 FAISS**:
 | 维度 | FAISS (旧) | ChromaDB (新) |
@@ -121,6 +184,7 @@ VectorStoreManager
 | 持久化 | 手动 pickle | 自动持久化目录 |
 | 集合管理 | 单文件 | 多集合隔离 |
 | 元数据过滤 | 需自行实现 | 内建支持 |
+| 混合检索 | ❌ 需自行实现 BM25 | ✅ 可集成 rank-bm25 |
 | 生产部署 | 单机内存 | 可选 HTTP 模式 |
 
 ---
@@ -449,13 +513,20 @@ system_initializer.initialize_system()
 ## 性能考量
 
 ### 延迟
-- **意图分类**: ~0.5-2s（每次调用 LLM）
-- **向量检索**: ~50-200ms（ChromaDB 内存模式）
-- **LLM 生成**: ~3-10s（7B 模型，取决于硬件）
-- **端到端**: ~4-12s（SSE 逐步呈现，首 token 约 2-3s）
+| 阶段 | 估算耗时 | 说明 |
+|------|---------|------|
+| 意图分类 | ~0.5-2s | LLM 调用 |
+| 稠密检索 | ~50-200ms | ChromaDB 内存模式 |
+| BM25 检索 | ~10-50ms | 纯 CPU 计算 |
+| RRF 融合 | ~1-5ms | 内存计算 |
+| Cross-Encoder 重排序 | ~100-500ms | CPU 推理（MiniLM） |
+| LLM 生成（首 token） | ~1-3s | 7B 模型 |
+| LLM 生成（后续 token） | ~30-60ms/token | 取决于推理硬件 |
+| **端到端（SSE）** | **~2-5s 首 token, 4-12s 完成** | |
 
 ### 优化方向
-1. **缓存频繁意图分类结果**（同一轮会话中意图通常不变）
+1. **缓存频繁意图分类结果**
 2. **提前检索**（在 LLM 生成的同时预取下一轮相关文档）
 3. **批处理嵌入**（减少 Ollama 嵌入调用的网络开销）
 4. **LLM 量化**（qwen2.5:7b → qwen2.5:7b-Q4_K_M 降低显存占用）
+5. **重排序模型量化**（MiniLM → ONNX 加速）

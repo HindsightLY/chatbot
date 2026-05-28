@@ -68,16 +68,31 @@ class SystemInitializer:
     def _initialize_vector_store(self):
         """
         初始化 ChromaDB 向量存储:
-          存在缓存 → 直接加载
-          不存在    → 从文档目录加载文件 → 分块 → 创建 Chroma 集合
+          存在缓存且非空 → 直接加载
+          不存在/为空     → 从文档目录加载文件 → 分块 → 创建 Chroma 集合
         """
         logger.info("📦 初始化 ChromaDB 向量存储...")
 
         vector_manager = VectorStoreManager()
         store = vector_manager.vector_store
 
+        need_rebuild = False
         if store is None:
-            logger.info("🔄 未找到现有向量库，正在创建新的向量存储...")
+            need_rebuild = True
+        else:
+            try:
+                count = store._collection.count()
+                if count == 0:
+                    need_rebuild = True
+                    logger.info("📁 ChromaDB 集合为空，将重新创建")
+                else:
+                    logger.info(f"✅ 成功加载现有 ChromaDB，包含 {count} 个文档")
+            except Exception:
+                need_rebuild = True
+                logger.info("📁 ChromaDB 状态异常，将重新创建")
+
+        if need_rebuild:
+            logger.info("🔄 正在创建新的向量存储...")
 
             doc_loader = DocumentLoader()
             documents = doc_loader.load_and_split_documents()
@@ -87,8 +102,6 @@ class SystemInitializer:
 
             store = vector_manager.create_vector_store(documents)
             logger.info("✅ 新 ChromaDB 创建完成！")
-        else:
-            logger.info("✅ 成功加载现有 ChromaDB！")
 
         # 返回 VectorStoreManager 而不是原始 Chroma 实例，
         # 以便上游通过 .vector_store 属性访问

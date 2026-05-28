@@ -13,6 +13,9 @@ LangGraph 智能体模块
   self.prompt          → {history} + {context} + {input}   (RAG)
   self.general_prompt  → {history} + {input}               (闲聊 / 天气)
   确保多轮对话中用户提到的信息（如姓名、症状等）可被后续轮次引用
+检索升级: 使用 VectorStoreManager.hybrid_search() 替代 similarity_search()
+  - 稠密 (ChromaDB) + 稀疏 (BM25) 混合检索 + RRF 融合
+  - 可选 Cross-Encoder 重排序
 """
 from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
@@ -103,7 +106,7 @@ class MedicalAgent:
         return {**state, "intent": intent}
 
     def _retrieve_docs(self, state: AgentState) -> AgentState:
-        """节点: 向量库检索"""
+        """节点: 混合检索（稠密 + 稀疏 + RRF + 可选重排序）"""
         messages = state["messages"]
         query = messages[-1]["content"] if messages else ""
 
@@ -112,10 +115,13 @@ class MedicalAgent:
             return {**state, "context_docs": []}
 
         try:
-            results = self.vector_store.similarity_search(
-                query, k=APP_CONFIG.retrieval_k,
-                score_threshold=APP_CONFIG.retrieval_score_threshold
-            )
+            if APP_CONFIG.use_hybrid_search:
+                results = self.vector_store.hybrid_search(query, k=APP_CONFIG.retrieval_k)
+            else:
+                results = self.vector_store.similarity_search(
+                    query, k=APP_CONFIG.retrieval_k,
+                    score_threshold=APP_CONFIG.retrieval_score_threshold
+                )
             docs = [doc.page_content for doc in results]
             logger.info(f"📚 检索到 {len(docs)} 篇相关文档")
             return {**state, "context_docs": docs}
@@ -293,14 +299,19 @@ class MedicalAgent:
 
             # === 2. 按意图路由 ===
             if intent == "medical_inquiry" or intent == "unknown":
-                # ---- 2a. 检索文档 ----
+                # ---- 2a. 混合检索文档 ----
                 docs = []
                 if self.vector_store:
                     try:
-                        results = self.vector_store.similarity_search(
-                            user_input, k=APP_CONFIG.retrieval_k,
-                            score_threshold=APP_CONFIG.retrieval_score_threshold
-                        )
+                        if APP_CONFIG.use_hybrid_search:
+                            results = self.vector_store.hybrid_search(
+                                user_input, k=APP_CONFIG.retrieval_k
+                            )
+                        else:
+                            results = self.vector_store.similarity_search(
+                                user_input, k=APP_CONFIG.retrieval_k,
+                                score_threshold=APP_CONFIG.retrieval_score_threshold
+                            )
                         docs = [doc.page_content for doc in results]
                         logger.info(f"📚 检索到 {len(docs)} 篇相关文档")
                     except Exception as e:

@@ -14,34 +14,38 @@ RAG（Retrieval-Augmented Generation）核心思想：**让 LLM 在回答前先�
   → DocumentLoader.load_documents()
       — 扫描 data/disease/ 目录
       — 每文件构建 LangChain Document(保留 metadata)
-  → RecursiveCharacterTextSplitter
-      — chunk_size=500, chunk_overlap=100
-      — separators=["\n\n", "\n", "。", "！", "？", "；", " ", ""]
+  → 分块策略（二选一）:
+      • 语义分块 (默认): SemanticChunker — 预分句 → 嵌入 → 余弦距离断点 → 合并语义块
+      • 固定回退: RecursiveCharacterTextSplitter(chunk_size=500, overlap=100)
   → VectorStoreManager.create_vector_store()
       — OllamaEmbeddings(nomic-embed-text) → 768 维向量
       — Chroma.from_documents() → 持久化到 data/chroma_db/
+      — jieba 分词 → BM25 索引构建
 ```
 
-**文件**: `document_loader.py` → `vector_store.py`
+**文件**: `document_loader.py:DocumentLoader` / `SemanticChunker` → `vector_store.py`
 
 ### 2. 检索（Retrieval）
 
 ```
 用户问题"头痛怎么办"
-  → vector_store.similarity_search(query, k=6, score_threshold=0.3)
-      — ChromaDB 余弦相似度召回 Top-6
-      — score_threshold=0.3 过滤低相关文档
+  → vector_store.hybrid_search(query, k=6)
+      Step 1 — 稠密:  ChromaDB 余弦相似度召回 Top-20
+      Step 2 — 稀疏:  BM25.jieba 分词 → BM25Okapi 召回 Top-20
+      Step 3 — 融合:  RRF score = Σ 1/(60 + rank)，合并去重 → 20~40 候选
+      Step 4 — 重排:  Cross-Encoder (MiniLM) 对 (query, doc) 打分 → 降序
+      Step 5 — 返回:  Top-6 最终结果
   → 返回 List[Document] → extract page_content → context_text
 ```
 
-**文件**: `vector_store.py:similarity_search()` → `agent.py:_retrieve_docs()`
+**文件**: `vector_store.py:hybrid_search()` → `agent.py:_retrieve_docs()`
 
 ### 3. 生成（Generation）
 
 ```
 PromptTemplate(
     history = MemoryStore.get_history_text(session_id)   # Redis 最近 10 轮
-    context = similarity_search 结果                       # ChromaDB 检索文档
+    context = hybrid_search 结果                           # 混合检索+重排序后文档
     input   = 用户当前问题
 )
   → OllamaLLM.invoke() / .stream()
@@ -81,10 +85,16 @@ PromptTemplate(
 
 | 参数 | 值 | 用途 |
 |------|-----|------|
-| `chunk_size` | 500 | 文档分块字符数 |
-| `chunk_overlap` | 100 | 块间重叠字符数 |
-| `retrieval_k` | 6 | 检索文档数 |
-| `score_threshold` | 0.3 | 相似度过滤阈值 |
+| `use_semantic_chunking` | `True` | 启用语义分块 |
+| `use_hybrid_search` | `True` | 启用混合检索 |
+| `use_reranking` | `True` | 启用 Cross-Encoder 重排序 |
+| `hybrid_prefetch_k` | 20 | 稠密/稀疏各预取数 |
+| `rrf_k` | 60 | RRF 融合常数 |
+| `rerank_top_k` | 6 | 重排序后文档数 |
+| `retrieval_k` | 6 | 最终返回文档数 |
+| `chunk_size` / `chunk_overlap` | 500 / 100 | 固定分块参数（回退） |
+| `semantic_chunk_min/max_size` | 200 / 800 | 语义块尺寸范围 |
+| `score_threshold` | 0.3 | 稠密检索过滤阈值 |
 | `temperature` | 0.1 | LLM 生成温度 |
 | `max_history_turns` | 10 | 记忆保留轮数 |
 | `redis_ttl` | 86400s (24h) | 记忆过期时间 |

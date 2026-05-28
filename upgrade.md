@@ -2,6 +2,8 @@
 
 > 本文档对比当前项目选型与行业主流方案，提出可量化的升级路径。
 > 按优先级（P0=关键 / P1=推荐 / P2=可选）排序。
+>
+> ✅ = 已实现
 
 ---
 
@@ -10,49 +12,56 @@
 ### 现状
 
 ```
-用户问题 → ChromaDB 相似度搜索 → LLM 生成
+用户问题 → 混合检索 (BM25 + Dense + RRF) → Cross-Encoder 重排序 → LLM 生成
 ```
-
-仅依赖单轮稠密向量检索，无查询优化、无重排序。
 
 ### 行业对比
 
 | 技术 | 当前状态 | 行业方案 | 差距 |
 |------|---------|---------|------|
-| 检索方式 | 纯稠密向量 | 混合检索 (BM25 + Dense) | ❌ |
-| 重排序 | 无 | Cohere Rerank / BGE-Reranker / Cross-Encoder | ❌ |
-| 查询转换 | 无 | HyDE / Multi-Query / Query Rewrite | ❌ |
-| 分块策略 | 固定 500 字符 | 语义分块 (Semantic Chunker) / 递归 LLM 分块 | ❌ |
+| 检索方式 | ✅ BM25 + Dense (RRF 融合) | 混合检索 | ✅ 已实现 |
+| 重排序 | ✅ MiniLM Cross-Encoder | Cohere Rerank / BGE-Reranker | ⚠️ 小模型, 可升级 |
+| 查询转换 | ❌ 无 | HyDE / Multi-Query / Query Rewrite | ❌ |
+| 分块策略 | ✅ 语义分块 (Semantic Chunker) | 语义分块 / 递归 LLM 分块 | ✅ 已实现 |
 
-### 升级建议
+### 已实现的升级
 
-**P0 — 混合检索 (Hybrid Search)**
-
-```
-当前: query → embedding → cosine_sim(doc.vector, query.vector)
-
-升级: query → embedding → cosine_sim(doc.vector, query.vector)  ← 稠密
-           → BM25 → keyword_tfidf(doc.text, query.text)          ← 稀疏
-           → weighted_sum(0.5*dense + 0.5*sparse)                ← 加权融合
-```
-
-ChromaDB 不原生支持 BM25，可通过 `rank_bm25` 库实现后融合(BFS)：
-1. 稠密检索取 Top-20
-2. BM25 检索取 Top-20
-3. Reciprocal Rank Fusion (RRF) 合并排序 → 最终 Top-6
-
-**P1 — 重排序 (Reranking)**
+**✅ P0 — 混合检索 (Hybrid Search)**
 
 ```
-检索 Top-20 → BGE-Reranker-v2-m3 打分 → 取 Top-3 给 LLM
+query → embedding → cosine_sim(doc.vector, query.vector)  ← 稠密 (ChromaDB Top-20)
+      → jieba 分词 → BM25Okapi.get_scores()               ← 稀疏 (BM25 Top-20)
+      → RRF: score = Σ 1/(rrf_k + rank)                    ← 融合
+      → Cross-Encoder 重排序                               ← 重排
+      → Top-6 最终结果
+```
+
+实现文件: `src/service/vector_store.py` — `hybrid_search()` 方法
+
+**✅ P0 — 语义分块 (Semantic Chunking)**
+
+```
+文本 → 预分句 (chunk_size=50)
+  → OllamaEmbeddings 逐句嵌入
+  → 余弦距离 > 80% 百分位阈值处断开
+  → 合并为语义块 (min=200, max=800)
+```
+
+实现文件: `src/service/document_loader.py` — `SemanticChunker` 类
+
+**✅ P1 — Cross-Encoder 重排序**
+
+```
+检索 Top-20~40 → cross-encoder/ms-marco-MiniLM-L-6-v2 打分 → Top-6
 ```
 
 ```bash
-pip install sentence-transformers
-# 模型: BAAI/bge-reranker-v2-m3 (1.5G, CPU 可运行)
+pip install sentence-transformers   # 可选；未安装时静默跳过重排序
 ```
 
-收益：大幅减少注入 prompt 的噪声文档，提升回答准确率 5-15%。
+实现文件: `src/service/vector_store.py` — `reranker` 属性 + `hybrid_search()` 中的重排序步骤
+
+### 下一步
 
 **P1 — 查询转换 (Query Transformation)**
 
@@ -377,8 +386,9 @@ for case in test_cases:
 
 | 优先级 | 项目 | 预估工时 | 收益 |
 |--------|------|---------|------|
-| **P0** | 混合检索 (BM25 + Dense) | 2-3 天 | 检索召回率 +10-20% |
-| **P0** | 重排序 (Reranker) | 1-2 天 | 准确率 +5-15% |
+| **P0** | ✅ 混合检索 (BM25 + Dense + RRF) | ✅ 已完成 | 检索召回率 +10-20% |
+| **P0** | ✅ 语义分块 (Semantic Chunking) | ✅ 已完成 | 话题凝聚力提升 |
+| **P1** | ✅ Cross-Encoder 重排序 | ✅ 已完成 | 准确率 +5-15% |
 | **P0** | Docker 容器化 | 1 天 | 部署标准化 |
 | **P1** | 查询转换 (Multi-Query / HyDE) | 1-2 天 | 召回复盖率提升 |
 | **P1** | 工具调用标准化 (bind_tools) | 1-2 天 | Agent 灵活性 |
@@ -396,12 +406,12 @@ for case in test_cases:
 
 ## 总结
 
-当前项目是一个**功能完善的原型**：核心 RAG 流程完整、流式交互顺畅、双模式可用。
-通向生产级系统的主要差距在于：
+当前项目是一个**功能完善的原型**，已完成三项核心检索升级（语义分块、混合检索、重排序），
+流式交互顺畅、双模式可用。通向生产级系统的主要差距在于：
 
-1. **检索质量**: 无混合检索、无重排序 → 最优先补齐
-2. **可观测性**: 无 LLM 调用追踪 → 调试效率低
-3. **部署**: 无容器化 → 环境一致性差
+1. **可观测性**: 无 LLM 调用追踪 → 调试效率低
+2. **部署**: 无容器化 → 环境一致性差
+3. **查询优化**: 无 Query Rewrite / Multi-Query → 召回复盖率不足
 4. **评估**: 无量化指标 → 优化方向不明确
 5. **Agent 能力**: 工具调用不规范 → 扩展困难
 
