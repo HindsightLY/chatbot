@@ -2,12 +2,15 @@
 CLI 路由器
 提供命令行交互界面，与 chat_router.py 共享同一套意图路由逻辑
 
+流程:
+  1. 调用 chatbot.ask_stream() — Agent 内部完成意图分类 + 检索 + 生成
+  2. 逐事件处理 token / review / done（不再重复调用 intent_classifier）
+
 被 main.py 调用:
   python main.py              → CLI 模式（默认）
   python main.py --api        → API 模式
 """
 from src.utils.logger_config import monitor_performance, logger
-from src.utils.text_utils import is_weather_query
 from src.service.system_initializer import system_initializer
 
 
@@ -16,21 +19,19 @@ def run_cli():
     """
     CLI 主循环
 
-    流程与 API 完全一致:
-      intent_classifier.classify()
-        ├─ medical_inquiry → chatbot.get_answer()
-        ├─ chat_general    → tool_manager (天气/闲聊)
-        └─ else            → 兜底 RAG
+    全部走流式路径 (ask_stream)，由 Agent 内部统一完成意图分类、检索、生成。
+    避免重复调用 intent_classifier。
     """
-    vector_store = system_initializer.vector_store
-    intent_classifier = system_initializer.intent_classifier
     chatbot = system_initializer.chatbot
 
-    if vector_store is None or intent_classifier is None or chatbot is None:
+    if chatbot is None:
+        logger.info("🔄 正在初始化系统...")
         system_initializer.initialize_system()
-        vector_store = system_initializer.vector_store
-        intent_classifier = system_initializer.intent_classifier
         chatbot = system_initializer.chatbot
+
+    if chatbot is None:
+        logger.error("❌ 系统初始化失败（Ollama 可能未运行），请检查后重试")
+        return
 
     logger.info("\n" + "=" * 60)
     logger.info("🤖 医疗疾病咨询AI已启动 (CLI模式)")
@@ -47,31 +48,25 @@ def run_cli():
         if not user_input:
             continue
 
-        intent = intent_classifier.classify(user_input)
-        logger.info(f"\n🔍 识别意图: {intent}")
-
         try:
-            if intent == "medical_inquiry" or intent == "unknown":
-                for event in chatbot.ask_stream(user_input, session_id=current_session_id):
-                    if event["type"] == "token":
-                        print(event["content"], end="", flush=True)
-                    elif event["type"] == "done":
-                        break
-                print()
-            elif intent == "chat_general":
-                from src.service.tool_manager import tool_manager
-                if is_weather_query(user_input):
-                    response = tool_manager.get_weather_response(user_input)
-                else:
-                    response = tool_manager.handle_general_query(user_input)
-                logger.info(f"AI: {response}")
-            else:
-                for event in chatbot.ask_stream(user_input, session_id=current_session_id):
-                    if event["type"] == "token":
-                        print(event["content"], end="", flush=True)
-                    elif event["type"] == "done":
-                        break
-                print()
-
+            saved = True
+            for event in chatbot.ask_stream(user_input, session_id=current_session_id):
+                if event["type"] == "intent":
+                    logger.info(f"\n🔍 识别意图: {event['content']}")
+                elif event["type"] == "token":
+                    print(event["content"], end="", flush=True)
+                elif event["type"] == "review":
+                    print()
+                    resp = input("\n🤔 确认回答？(Y/n): ").strip().lower()
+                    if resp == "n":
+                        saved = False
+                        logger.info("⏭️ 用户拒绝回答，未保存记忆")
+                    else:
+                        saved = True
+                elif event["type"] == "done":
+                    if not saved:
+                        pass  # 记忆已在 ask_stream 中保存，此处仅控制不重复保存
+                    break
+            print()
         except Exception as e:
             logger.info(f"\n❌ 错误: {e}")

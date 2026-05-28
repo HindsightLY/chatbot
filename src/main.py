@@ -40,10 +40,21 @@ if static_dir.is_dir():
 
 @app.on_event("startup")
 def startup_event():
-    """FastAPI 启动时初始化系统组件"""
+    """FastAPI 启动时初始化系统组件（容错：组件失败不影响服务启动）"""
     logger.info("🚀 正在初始化医疗AI系统...")
-    system_initializer.initialize_system()
-    logger.info("🎉 系统初始化完成，API 就绪！")
+    try:
+        system_initializer.initialize_system()
+    except Exception as e:
+        logger.error(f"❌ 系统初始化异常: {e}")
+        logger.warning("⚠️ 部分组件可能未就绪，API 将以降级模式运行")
+
+    if system_initializer.init_errors:
+        logger.warning("⚠️ 以下组件初始化失败，功能可能受限:")
+        for err in system_initializer.init_errors:
+            logger.warning(f"  - {err}")
+    else:
+        logger.info("🎉 系统初始化完成，API 就绪！")
+
     logger.info(f"📁 ChromaDB 存储位置: {APP_CONFIG.chroma_persist_dir}")
     logger.info(f"📁 文档数据位置: {APP_CONFIG.disease_dir}")
 

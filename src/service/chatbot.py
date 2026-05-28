@@ -49,8 +49,13 @@ class MedicalChatbot:
             return {"answer": answer}
 
         except Exception as e:
+            err_str = str(e)
+            if "Connection refused" in err_str or "ConnectError" in err_str or "10061" in err_str:
+                msg = "⚠️ Ollama 服务未运行，请先启动 Ollama（ollama serve）后重试。"
+            else:
+                msg = f"抱歉，处理出错: {e}"
             logger.exception(f"获取答案失败")
-            return {"answer": "抱歉，我暂时无法回答这个问题。"}
+            return {"answer": msg}
 
     def ask_stream(self, question: str, session_id: str = "default"):
         """
@@ -64,6 +69,11 @@ class MedicalChatbot:
         try:
             yield from self.agent.run_stream(user_input=question, session_id=session_id)
         except Exception as e:
+            err_str = str(e)
+            if "Connection refused" in err_str or "ConnectError" in err_str or "10061" in err_str:
+                msg = "⚠️ Ollama 服务未运行，请先启动 Ollama（ollama serve）后重试。"
+            else:
+                msg = f"抱歉，处理出错: {e}"
             logger.exception(f"流式获取答案失败")
-            yield {"type": "token", "content": "抱歉，我暂时无法回答这个问题。"}
+            yield {"type": "token", "content": msg}
             yield {"type": "done"}

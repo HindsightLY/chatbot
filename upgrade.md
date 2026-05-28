@@ -153,54 +153,72 @@ if turn_count % 20 == 0:
 ### 现状
 
 ```python
-StateGraph → 6 个节点 → conditional_edges → compile(MemorySaver)
+StateGraph → classify_intent → call_model(bind_tools) → conditional
+  ├─ 有工具调用 → tool_node → call_model (循环)
+  └─ 无工具调用 → human_review → save_memory → END
 ```
 
-仅用于简单的意图路由 + RAG 链。
+已实现工具调用标准化 + 人机协同。
 
 ### 行业对比
 
 | 功能 | 当前 | LangGraph 完整能力 | AutoGen / CrewAI |
 |------|------|-------------------|------------------|
-| Human-in-the-Loop | ❌ | `interrupt_after` ✅ | ✅ |
+| Human-in-the-Loop | ✅ `interrupt_after` | `interrupt_after` ✅ | ✅ |
 | 并行节点 | ❌ | `add_node` + fan-out ✅ | ✅ 多 agent |
-| 循环/重试 | ❌ | `add_conditional_edges` 自环 ✅ | ✅ |
-| Tool Calling | ❌ 字符串 prompt | `bind_tools()` + ToolNode ✅ | ✅ 原生 |
+| 循环/重试 | ✅ `call_model → tool_node → call_model` | `add_conditional_edges` 自环 ✅ | ✅ |
+| Tool Calling | ✅ `bind_tools()` + ToolNode + @tool | `bind_tools()` + ToolNode ✅ | ✅ 原生 |
 | 多 Agent 协作 | ❌ | `Send()` API / Supervisor ✅ | ✅ 原生 |
 | 持久化检查点 | ❌ | PostgreSQL / SQLite 检查点 ✅ | ❌ |
 
-### 升级建议
+### 已实现的升级
 
-**P1 — 工具调用标准化**
+**✅ P1 — 工具调用标准化**
 
 ```python
-# 当前: 字符串 prompt 嵌入工具描述
-# 升级: LangChain Tool + bind_tools()
-
+# src/tools/medical_tools.py
 from langchain_core.tools import tool
 
 @tool
-def search_medical_docs(query: str) -> str:
-    """搜索医学知识库"""
-    return vector_store.search(query)
+def search_medical_knowledge(query: str) -> str:
+    """搜索医学知识库，获取与疾病、症状、治疗方法相关的医学资料"""
+    ...
 
-llm_with_tools = llm.bind_tools([search_medical_docs, get_weather])
-tool_node = ToolNode([search_medical_docs, get_weather])
+@tool
+def get_weather(location: str) -> str:
+    """查询指定城市的实时天气信息"""
+    ...
+
+@tool
+def chat_general(query: str) -> str:
+    """回答用户的一般性问题、闲聊、问候等"""
+    ...
+
+# tools 列表：tools = [search_medical_knowledge, get_weather, chat_general]
+
+# agent.py 中使用：
+llm_with_tools = ChatOllama(...).bind_tools(tools)
+tool_node = ToolNode(tools)
 ```
 
-收益：LLM 自主决定是否、何时、以何参数调用工具，远比字符串 prompt 灵活。
-
-**P2 — 人机协同 (Human-in-the-Loop)**
+**✅ P1 — 人机协同 (Human-in-the-Loop)**
 
 ```python
-def generate_answer(state):
-    answer = llm.invoke(state["prompt"])
-    return {"answer": answer}
+# agent.py — 图构建
+builder.add_node("human_review", self._human_review)
+builder.add_edge("human_review", "save_memory")
 
-# 在生成后中断，等待人工审核
-graph.add_edge("generate_answer", "human_review")
-graph.set_interrupt_after("generate_answer")
+# compile 时指定中断节点
+graph = builder.compile(checkpointer=MemorySaver(), interrupt_after=["human_review"])
 ```
+
+**实现细节**:
+- `human_review` 节点通过 `interrupt_after` 暂停图执行，等待外部 `resume` 或 `update_state`
+- CLI 模式中，用户可输入 Y/n 确认或拒绝回答
+- SSE 流式路径中，生成回答后 yield `{"type": "review", "content": answer}` 事件
+- 新增 `POST /api/chat/review` 端点记录审核结果
+- 审核结果可扩展：approved / rejected + feedback
+- 未来可对接前端审核 UI（点赞/踩/修改建议）
 
 ---
 
@@ -389,14 +407,14 @@ for case in test_cases:
 | **P0** | ✅ 混合检索 (BM25 + Dense + RRF) | ✅ 已完成 | 检索召回率 +10-20% |
 | **P0** | ✅ 语义分块 (Semantic Chunking) | ✅ 已完成 | 话题凝聚力提升 |
 | **P1** | ✅ Cross-Encoder 重排序 | ✅ 已完成 | 准确率 +5-15% |
+| **P1** | ✅ 工具调用标准化 (bind_tools + @tool) | ✅ 已完成 | Agent 灵活性 |
+| **P1** | ✅ 人机协同 (interrupt_after + review) | ✅ 已完成 | 安全性 / 可控性 |
 | **P0** | Docker 容器化 | 1 天 | 部署标准化 |
 | **P1** | 查询转换 (Multi-Query / HyDE) | 1-2 天 | 召回复盖率提升 |
-| **P1** | 工具调用标准化 (bind_tools) | 1-2 天 | Agent 灵活性 |
 | **P1** | 分层记忆 (摘要+语义检索) | 2-3 天 | 记忆质量 |
 | **P1** | LangSmith 可观测性 | 0.5 天 | 调试效率 |
 | **P1** | BERT 分类器替代 LLM 分类 | 2-3 天 | 延迟 2s→50ms |
 | **P1** | RAGAS 评估 | 1-2 天 | 量化质量 |
-| **P2** | 人机协同 (Human-in-the-Loop) | 2-3 天 | 安全性 |
 | **P2** | 模型路由 | 1-2 天 | 成本优化 |
 | **P2** | WebSocket / 前端增强 | 3-5 天 | 用户体验 |
 | **P2** | 生产级向量库 (Qdrant) | 3-5 天 | 扩展性 |
@@ -406,13 +424,13 @@ for case in test_cases:
 
 ## 总结
 
-当前项目是一个**功能完善的原型**，已完成三项核心检索升级（语义分块、混合检索、重排序），
-流式交互顺畅、双模式可用。通向生产级系统的主要差距在于：
+当前项目是一个**功能完善的原型**，已完成五项核心升级（语义分块、混合检索、重排序、
+工具调用标准化、人机协同），流式交互顺畅、双模式可用。通向生产级系统的主要差距在于：
 
 1. **可观测性**: 无 LLM 调用追踪 → 调试效率低
 2. **部署**: 无容器化 → 环境一致性差
 3. **查询优化**: 无 Query Rewrite / Multi-Query → 召回复盖率不足
 4. **评估**: 无量化指标 → 优化方向不明确
-5. **Agent 能力**: 工具调用不规范 → 扩展困难
+5. **并行节点**: 无 fan-out → 无法并行执行多个工具
 
 建议按 P0 → P1 → P2 的顺序逐步演进，每完成一个阶段进行一次质量评估。

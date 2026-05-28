@@ -39,7 +39,55 @@ class ChatResponse(BaseModel):
     answer: str
 
 
+class ReviewRequest(BaseModel):
+    """人工审核请求"""
+    session_id: str
+    approved: bool = True
+    feedback: str = ""
+
+
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+# 临时存储审核状态（生产环境建议用 Redis）
+_pending_reviews: dict = {}
+
+
+@router.post("/review")
+async def api_review(request: ReviewRequest):
+    """
+    人工审核接口
+    用于 SSE 流式模式中用户确认/拒绝 AI 回答。
+
+    Args:
+        session_id: 会话 ID
+        approved: 是否通过审核
+        feedback: 用户反馈（可选）
+    """
+    _pending_reviews[request.session_id] = {
+        "approved": request.approved,
+        "feedback": request.feedback,
+    }
+    logger.info(f"📝 审核记录: session={request.session_id}, approved={request.approved}")
+    return {"success": True, "session_id": request.session_id}
+
+
+@router.get("/health")
+async def api_health():
+    """系统健康检查接口（用于前端监控和 Docker 健康检查）"""
+    from src.service.system_initializer import system_initializer
+    si = system_initializer
+    return {
+        "status": "ok" if si.initialized else "initializing",
+        "components": {
+            "vector_store": si.vector_store is not None,
+            "memory_store": si.memory_store is not None,
+            "intent_classifier": si.intent_classifier is not None,
+            "tool_manager": si.tool_manager is not None,
+            "agent": si.agent is not None,
+            "chatbot": si.chatbot is not None,
+        },
+        "errors": si.init_errors if si.init_errors else [],
+    }
 
 
 @router.post("", response_model=ChatResponse)
@@ -116,11 +164,9 @@ async def api_chat_stream(request: ChatRequest):
                     yield f"data: {json.dumps({'intent': event['content']}, ensure_ascii=False)}\n\n"
                 elif event["type"] == "token":
                     yield f"data: {json.dumps(event['content'], ensure_ascii=False)}\n\n"
+                elif event["type"] == "review":
+                    yield f"data: {json.dumps({'review': True, 'answer': event['content']}, ensure_ascii=False)}\n\n"
                 elif event["type"] == "done":
-                    break
-                elif event["type"] == "error":
-                    logger.error(f"流式处理错误: {event['content']}")
-                    yield f"data: {json.dumps({'error': event['content']}, ensure_ascii=False)}\n\n"
                     break
 
             yield "data: [DONE]\n\n"

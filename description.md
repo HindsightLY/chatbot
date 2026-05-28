@@ -222,46 +222,63 @@ TTL:   86400s (每次 rpush 时刷新)
 
 ### 5. Agent — `src/service/agent.py`
 
-**职责**: LangGraph StateGraph 驱动的多节点 Agent，封装 RAG 全流程。
+**职责**: LangGraph StateGraph 驱动的多节点 Agent，封装 RAG + 工具调用 + 人机协同全流程。
 
 **节点定义**:
 
 ```
-classify_intent
+classify_intent (仅日志/UI展示)
   → _classify_intent(state):
-      messages[-1] → IntentClassifier → intent
+      messages[-1] → IntentClassifier → intent (并存 state 供前端)
 
-conditional edge (route_by_intent)
-  ├── medical_inquiry / unknown
-  │     → retrieve_docs
-  │         → _retrieve_docs(state):
-  │             messages[-1] → ChromaDB.similarity_search()
-  │           generate_answer
-  │         → _generate_answer(state):
-  │             {history} + {context} + {input} → OllamaLLM.invoke()
-  │           save_memory
-  │         → _save_memory(state):
-  │             user_input + answer → MemoryStore.add_message()
+call_model (bind_tools — LLM 自主决策)
+  → _call_model(state):
+      ChatOllama.bind_tools([search_medical_knowledge, get_weather, chat_general])
+      LLM 自主决定:
+        ├─ 医疗问题 → 调用 search_medical_knowledge
+        ├─ 天气问题 → 调用 get_weather
+        └─ 其他     → 直接回答 (chat_general)
+
+conditional edge (should_continue)
+  ├── 有 tool_calls → tool_node
+  │     → ToolNode 执行工具 → 结果回填到 messages
+  │     → 返回 call_model (循环，LLM 用工具结果生成最终答案)
   │
-  ├── chat_general + is_weather_query
-  │     → weather_query → _weather_query(state):
-  │         get_weather_response() → 与 history 合并后 LLM 润色
-  │
-  └── chat_general / system_query
-        → general_chat → _general_chat(state):
-            general_prompt.format(history, input) → OllamaLLM.invoke()
+  └── 无 tool_calls → human_review (interrupt_after)
+        → 暂停等待外部确认或自动批准
+
+human_review (人机协同)
+  → _human_review(state):
+      interrupt_after 暂停，等待 resume() 或 update_state()
+      外部可通过 POST /api/chat/review 或 CLI 输入确认
+
+save_memory (记忆持久化)
+  → _save_memory(state):
+      user_input + answer → MemoryStore.add_message()
 ```
 
 **状态定义 (AgentState TypedDict)**:
 ```python
 {
-    "messages": List[Dict],      # 当前轮消息 [{"role": "user", "content": ...}]
+    "messages": List[Any],       # 消息列表 (HumanMessage / AIMessage)
     "session_id": str,           # 会话隔离标识
     "intent": str,               # 分类结果
     "context_docs": List[str],   # ChromaDB 检索到的文档正文
-    "answer": str                # LLM 最终回答
+    "answer": str,               # LLM 最终回答
+    "human_approved": bool,      # 审核结果
+    "review_skipped": bool       # 是否跳过审核
 }
 ```
+
+**工具定义** (`src/tools/medical_tools.py`):
+
+使用 `@tool` 装饰器定义标准 LangChain 工具：
+
+| 工具 | 函数 | 触发条件 |
+|------|------|---------|
+| `search_medical_knowledge(query)` | ChromaDB 混合检索 | 医疗相关问题 |
+| `get_weather(location)` | 高德天气 API | 天气查询 |
+| `chat_general(query)` | ChatOllama 直接回答 | 闲聊/系统查询 |
 
 **Prompt 模板**:
 
@@ -273,9 +290,7 @@ conditional edge (route_by_intent)
 两套模板均包含 `{history}`（来自 Redis 的最近 10 轮对话），
 确保多轮记忆中提到的信息（姓名、既往症状等）可在后续轮次引用。
 
-**流式推理 (run_stream)**:
-`run_stream()` 不依赖 LangGraph 图执行，直接走条件分支 + `OllamaLLM.stream()`，
-在 `yield` 层面实现 per-token 推送。按意图分类结果直接分流：
+**流式推理 (run_stream)** — 沿用条件分支 + `ChatOllama.stream()`，增加审核事件：
 
 ```
 意图分类
@@ -283,21 +298,39 @@ conditional edge (route_by_intent)
   ├── medical_inquiry / unknown
   │     → ChromaDB 检索
   │     → self.prompt + history + context
-  │     → ollama.stream(formatted_prompt)
+  │     → ChatOllama.stream(formatted_prompt)
   │
   ├── chat_general + 天气
   │     → get_weather_response() → self.general_prompt + history
-  │     → ollama.stream()
+  │     → ChatOllama.stream()
   │
   ├── chat_general / system_query
   │     → self.general_prompt + history + input
-  │     → ollama.stream()
+  │     → ChatOllama.stream()
+  │
+  ├── review event
+  │     → yield {"type": "review", "content": full_answer}
+  │     → CLI: 等待用户 Y/n 确认
+  │     → SSE: 前端可调用 /api/chat/review 记录审核结果
   │
   └── save_memory → add_message(user + assistant)
 ```
 
-**LangGraph 图执行 (run)**:
-`run()` 走完整 LangGraph 图，适合需要图拓扑的复杂场景（未来可加 human-in-the-loop、并行节点等）。
+**LangGraph 图执行 (run)** — 完整图拓扑，含工具调用 + 人机协同：
+
+```
+classify_intent → call_model → conditional
+  ├─ tool_calls → tool_node → call_model (循环)
+  └─ 无工具调用 → human_review (interrupt_after) → save_memory → END
+```
+
+**编译参数**:
+```python
+graph = builder.compile(
+    checkpointer=MemorySaver(),
+    interrupt_after=["human_review"]  # 在 human_review 节点后暂停
+)
+```
 
 ---
 

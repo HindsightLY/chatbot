@@ -59,22 +59,23 @@ PromptTemplate(
 ## Agent 架构（LangGraph StateGraph）
 
 ```
-入口: classify_intent ──── 条件路由
+classify_intent (日志/UI)
   │
-  ├── medical_inquiry / unknown → retrieve_docs (ChromaDB 检索)
-  │     → generate_answer (PromptTemplate + OllamaLLM)
-  │     → save_memory (Redis 写入)
-  │
-  ├── chat_general + 天气 → weather_query (高德 API + LLM 润色)
-  │     → save_memory
-  │
-  └── chat_general / system_query → general_chat (general_prompt + LLM)
-        → save_memory
+  └── call_model (ChatOllama.bind_tools)
+        │
+        ├── LLM 调用工具 → tool_node
+        │     ├─ search_medical_knowledge  (ChromaDB 混合检索)
+        │     ├─ get_weather               (高德天气 API)
+        │     └─ chat_general              (ChatOllama 直接回答)
+        │     → 工具结果 → call_model (循环)
+        │
+        └── LLM 直接回答 → human_review (interrupt_after)
+              → save_memory (Redis 写入) → END
 ```
 
 **路径选择**:
-- **流式路径** (`run_stream`): 直接走 Python 条件分支 + `OllamaLLM.stream()`，不经过图
-- **同步路径** (`run`): 走完整 LangGraph 图 + `OllamaLLM.invoke()`
+- **流式路径** (`run_stream`): 条件分支 + `ChatOllama.stream()`，生成后 yield review 事件
+- **同步路径** (`run`): 完整 LangGraph 图 + `ChatOllama.invoke()` + 工具调用 + 人机协同
 
 **多轮记忆**: 所有分支生成 prompt 前都从 Redis 拉取最近 10 轮对话历史，
 确保用户在第一轮提到的信息（姓名、既往症状）可被后续轮次引用。

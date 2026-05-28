@@ -11,7 +11,6 @@
     → VectorStoreManager.create_vector_store()
 """
 import os
-import re
 import numpy as np
 from typing import List
 from langchain_core.documents import Document

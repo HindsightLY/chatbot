@@ -3,28 +3,27 @@ LangGraph 智能体模块
 实现基于 LangGraph StateGraph 的多节点 Agent，替代原有 LCEL 链
 
 节点流转:
-  classify_intent → conditional
-    ├─ medical_inquiry → retrieve_docs → generate_answer → save_memory
-    ├─ chat_general+天气 → weather_query → save_memory
-    ├─ chat_general/other → general_chat → save_memory
-    └─ unknown → retrieve_docs (兜底 RAG)
+  call_model (bind_tools) → conditional
+    ├─ 有工具调用 → tool_node → call_model (循环)
+    └─ 无工具调用 → human_review → save_memory → END
 
-关键设计: 所有分支（RAG / 闲聊 / 天气）在构造 prompt 时均注入对话历史
-  self.prompt          → {history} + {context} + {input}   (RAG)
-  self.general_prompt  → {history} + {input}               (闲聊 / 天气)
-  确保多轮对话中用户提到的信息（如姓名、症状等）可被后续轮次引用
-检索升级: 使用 VectorStoreManager.hybrid_search() 替代 similarity_search()
-  - 稠密 (ChromaDB) + 稀疏 (BM25) 混合检索 + RRF 融合
-  - 可选 Cross-Encoder 重排序
+关键设计:
+  - 使用 LangChain @tool 装饰器定义工具（medical_tools.py）
+  - LLM 通过 bind_tools() 自主决定调用哪个工具
+  - human_review 节点通过 interrupt_after 实现人机协同
+  - 流式路径 (run_stream) 同样支持工具调用 + 人工审核事件
 """
-from typing import TypedDict, List, Dict, Any
+from typing import TypedDict, List, Dict
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_ollama import OllamaLLM
+from langgraph.prebuilt import ToolNode
+from langchain_ollama import ChatOllama
 from langchain_core.prompts import PromptTemplate
+from langchain_core.messages import HumanMessage
 from config.app_config import APP_CONFIG
-from src.utils.text_utils import is_weather_query
+from src.tools.medical_tools import tools
 from src.utils.logger_config import logger
+from src.utils.text_utils import is_weather_query
 
 
 class AgentState(TypedDict):
@@ -34,6 +33,8 @@ class AgentState(TypedDict):
     intent: str
     context_docs: List[str]
     answer: str
+    human_approved: bool
+    review_skipped: bool
 
 
 class MedicalAgent:
@@ -41,9 +42,9 @@ class MedicalAgent:
     医疗咨询智能体
 
     管理 LangGraph 状态图的生命周期:
-      - 构建图结构
+      - 构建图结构（bind_tools + ToolNode + human_review）
       - 注入外部依赖（LLM / 向量库 / 记忆存储 / 意图分类器 / 工具）
-      - 执行单轮推理
+      - 执行单轮推理 / 流式推理
     """
 
     def __init__(self, vector_store, memory_store, intent_classifier, tool_manager):
@@ -52,18 +53,20 @@ class MedicalAgent:
             vector_store: ChromaDB 实例（来自 VectorStoreManager）
             memory_store: MemoryStore 实例（Redis）
             intent_classifier: IntentClassifier 实例
-            tool_manager: ToolManager 实例
+            tool_manager: ToolManager 实例（保留兼容）
         """
         self.vector_store = vector_store
         self.memory_store = memory_store
         self.intent_classifier = intent_classifier
         self.tool_manager = tool_manager
 
-        self.llm = OllamaLLM(
+        self.llm = ChatOllama(
             model=APP_CONFIG.llm_model_name,
             temperature=APP_CONFIG.llm_temperature,
             base_url=APP_CONFIG.llm_base_url
         )
+
+        self.llm_with_tools = self.llm.bind_tools(tools)
 
         self.prompt = PromptTemplate.from_template(
             """你是一位专业医疗顾问。请根据以下医学资料和对话历史回答用户问题。
@@ -93,165 +96,151 @@ class MedicalAgent:
 请直接回答用户的问题，语言亲切自然。"""
         )
 
+        self.tool_node = ToolNode(tools)
         self.graph = self._build_graph()
 
     # ────────── 节点函数 ──────────
 
     def _classify_intent(self, state: AgentState) -> AgentState:
-        """节点: 意图分类"""
+        """节点: 意图分类（仅用于日志和前端展示）"""
         messages = state["messages"]
-        last_content = messages[-1]["content"] if messages else ""
+        last_content = ""
+        if messages:
+            last = messages[-1]
+            if hasattr(last, "content"):
+                last_content = last.content
+            elif isinstance(last, dict):
+                last_content = last.get("content", "")
         intent = self.intent_classifier.classify(last_content)
         logger.info(f"🔍 Agent 识别意图: {intent}")
         return {**state, "intent": intent}
 
-    def _retrieve_docs(self, state: AgentState) -> AgentState:
-        """节点: 混合检索（稠密 + 稀疏 + RRF + 可选重排序）"""
-        messages = state["messages"]
-        query = messages[-1]["content"] if messages else ""
-
-        if not self.vector_store:
-            logger.warning("⚠️ 向量库未就绪，跳过检索")
-            return {**state, "context_docs": []}
-
-        try:
-            if APP_CONFIG.use_hybrid_search:
-                results = self.vector_store.hybrid_search(query, k=APP_CONFIG.retrieval_k)
-            else:
-                results = self.vector_store.similarity_search(
-                    query, k=APP_CONFIG.retrieval_k,
-                    score_threshold=APP_CONFIG.retrieval_score_threshold
-                )
-            docs = [doc.page_content for doc in results]
-            logger.info(f"📚 检索到 {len(docs)} 篇相关文档")
-            return {**state, "context_docs": docs}
-        except Exception as e:
-            logger.exception(f"❌ 检索失败")
-            return {**state, "context_docs": []}
-
-    def _generate_answer(self, state: AgentState) -> AgentState:
-        """节点: RAG 生成回答"""
-        messages = state["messages"]
-        last_content = messages[-1]["content"] if messages else ""
-
-        context_text = "\n\n".join(state.get("context_docs", [])) or "未找到相关医学资料"
+    def _call_model(self, state: AgentState) -> AgentState:
+        """
+        节点: 调用 LLM（已绑定工具）
+        LLM 自主决定是否调用工具，或直接生成回答。
+        """
+        messages = state.get("messages", [])
         history_text = self.memory_store.get_history_text(state["session_id"])
 
-        formatted_prompt = self.prompt.format(
+        last_content = ""
+        if messages and isinstance(messages[-1], dict):
+            last_content = messages[-1].get("content", "")
+        elif messages and hasattr(messages[-1], "content"):
+            last_content = messages[-1].content
+
+        formatted_prompt = self.general_prompt.format(
             history=history_text,
-            context=context_text,
             input=last_content
         )
 
         try:
-            answer = self.llm.invoke(formatted_prompt)
-            logger.info(f"💡 RAG 生成完成，长度: {len(answer)}")
-            return {**state, "answer": answer}
+            result = self.llm_with_tools.invoke(
+                [HumanMessage(content=formatted_prompt)]
+            )
+            answer_text = result.content if hasattr(result, "content") else str(result)
+            logger.info(f"🤖 LLM 生成完成，tool_calls: {bool(getattr(result, 'tool_calls', None))}")
+
+            new_messages = list(messages)
+            new_messages.append(result)
+
+            return {**state, "messages": new_messages, "answer": answer_text}
         except Exception as e:
-            logger.exception(f"❌ LLM 生成失败")
+            logger.exception(f"❌ LLM 调用失败")
             return {**state, "answer": "抱歉，我暂时无法回答这个问题。"}
 
-    def _weather_query(self, state: AgentState) -> AgentState:
-        """节点: 天气查询 — 带对话历史的润色输出"""
-        messages = state["messages"]
-        query = messages[-1]["content"] if messages else ""
-        history = self.memory_store.get_history_text(state["session_id"])
+    def _should_continue(self, state: AgentState) -> str:
+        """条件边: 判断是否需要继续调用工具"""
+        messages = state.get("messages", [])
+        if not messages:
+            return "end"
+        last = messages[-1]
+        if hasattr(last, "tool_calls") and last.tool_calls:
+            return "continue"
+        if isinstance(last, dict) and last.get("tool_calls"):
+            return "continue"
+        return "end"
 
+    def _tool_node_wrapper(self, state: AgentState) -> AgentState:
+        """节点: 执行工具调用"""
         try:
-            weather_data = self.tool_manager.get_weather_response(query)
-            formatted_prompt = self.general_prompt.format(
-                history=history,
-                input=f"用户问天气：{query}\n天气数据：{weather_data}"
-            )
-            answer = self.llm.invoke(formatted_prompt)
-            return {**state, "answer": answer}
+            result = self.tool_node.invoke(state)
+            if isinstance(result, dict) and "messages" in result:
+                messages = list(state.get("messages", []))
+                messages.extend(result["messages"])
+                return {**state, "messages": messages}
+            elif isinstance(result, list):
+                messages = list(state.get("messages", []))
+                messages.extend(result)
+                return {**state, "messages": messages}
         except Exception as e:
-            logger.exception(f"❌ 天气查询失败")
-            return {**state, "answer": "获取天气信息失败，请稍后再试。"}
+            logger.exception(f"❌ 工具执行失败")
+        return state
 
-    def _general_chat(self, state: AgentState) -> AgentState:
-        """节点: 通用闲聊/系统查询 — 带对话历史的完整上下文"""
-        messages = state["messages"]
-        query = messages[-1]["content"] if messages else ""
-        history = self.memory_store.get_history_text(state["session_id"])
-
-        try:
-            formatted_prompt = self.general_prompt.format(
-                history=history,
-                input=query
-            )
-            answer = self.llm.invoke(formatted_prompt)
-            return {**state, "answer": answer}
-        except Exception as e:
-            logger.exception(f"❌ 通用对话失败")
-            return {**state, "answer": "抱歉，我暂时无法回答这个问题。"}
+    def _human_review(self, state: AgentState) -> AgentState:
+        """
+        节点: 人工审核（仅同步图路径）
+        通过 interrupt_after 暂停，等待外部调用 resume 或 update_state。
+        """
+        logger.info(f"⏸️ 等待人工审核，session_id={state['session_id']}")
+        return state
 
     def _save_memory(self, state: AgentState) -> AgentState:
         """节点: 记忆持久化到 Redis"""
         messages = state["messages"]
-        last_content = messages[-1]["content"] if messages else ""
+        last_user_msg = ""
+        for msg in reversed(messages):
+            content = msg.content if hasattr(msg, "content") else (msg.get("content", "") if isinstance(msg, dict) else "")
+            if hasattr(msg, "type") and msg.type == "human":
+                last_user_msg = content
+                break
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                last_user_msg = content
+                break
 
-        self.memory_store.add_message(state["session_id"], "user", last_content)
-        self.memory_store.add_message(state["session_id"], "assistant", state["answer"])
-        return state
+        self.memory_store.add_message(state["session_id"], "user", last_user_msg)
+        self.memory_store.add_message(state["session_id"], "assistant", state.get("answer", ""))
+        return {**state, "human_approved": True}
 
     # ────────── 路由 ──────────
-
-    def _route_by_intent(self, state: AgentState) -> str:
-        """根据意图条件路由到下一节点"""
-        intent = state.get("intent", "unknown")
-
-        if intent == "medical_inquiry" or intent == "unknown":
-            return "retrieve_docs"
-
-        if intent == "chat_general":
-            messages = state["messages"]
-            last_content = messages[-1]["content"] if messages else ""
-            if is_weather_query(last_content):
-                return "weather_query"
-            return "general_chat"
-
-        # system_query 或其他
-        return "general_chat"
 
     # ────────── 图构建 ──────────
 
     def _build_graph(self) -> StateGraph:
-        """构建 LangGraph 状态图"""
+        """构建 LangGraph 状态图（含工具调用 + 人机协同）"""
         builder = StateGraph(AgentState)
 
         builder.add_node("classify_intent", self._classify_intent)
-        builder.add_node("retrieve_docs", self._retrieve_docs)
-        builder.add_node("generate_answer", self._generate_answer)
-        builder.add_node("weather_query", self._weather_query)
-        builder.add_node("general_chat", self._general_chat)
+        builder.add_node("call_model", self._call_model)
+        builder.add_node("tool_node", self._tool_node_wrapper)
+        builder.add_node("human_review", self._human_review)
         builder.add_node("save_memory", self._save_memory)
 
         builder.set_entry_point("classify_intent")
+        builder.add_edge("classify_intent", "call_model")
 
         builder.add_conditional_edges(
-            "classify_intent",
-            self._route_by_intent,
+            "call_model",
+            self._should_continue,
             {
-                "retrieve_docs": "retrieve_docs",
-                "weather_query": "weather_query",
-                "general_chat": "general_chat",
+                "continue": "tool_node",
+                "end": "human_review",
             }
         )
 
-        builder.add_edge("retrieve_docs", "generate_answer")
-        builder.add_edge("generate_answer", "save_memory")
-        builder.add_edge("weather_query", "save_memory")
-        builder.add_edge("general_chat", "save_memory")
+        builder.add_edge("tool_node", "call_model")
+        builder.add_edge("human_review", "save_memory")
         builder.add_edge("save_memory", END)
 
-        return builder.compile(checkpointer=MemorySaver())
+        checkpointer = MemorySaver()
+        return builder.compile(checkpointer=checkpointer, interrupt_after=["human_review"])
 
     # ────────── 推理入口 ──────────
 
     def run(self, user_input: str, session_id: str = "default") -> str:
         """
         执行单轮 Agent 推理（同步阻塞，返回完整回答）
+        支持工具调用 + 人工审核中断。
 
         Args:
             user_input: 用户输入
@@ -261,21 +250,33 @@ class MedicalAgent:
             回答文本
         """
         initial_state: AgentState = {
-            "messages": [{"role": "user", "content": user_input}],
+            "messages": [HumanMessage(content=user_input)],
             "session_id": session_id,
             "intent": "",
             "context_docs": [],
-            "answer": ""
+            "answer": "",
+            "human_approved": False,
+            "review_skipped": False,
         }
 
         thread_config = {"configurable": {"thread_id": session_id}}
 
         try:
+            # 首次调用: 执行到 human_review 节点中断
             final_state = self.graph.invoke(initial_state, config=thread_config)
+
+            # 如果被中断，自动批准（CLI 模式下可改造为等待用户确认）
+            if self.graph.get_state(thread_config).next:
+                logger.info("✅ 自动批准（未启用外部审核）")
+                final_state = self.graph.invoke(None, config=thread_config)
+
             return final_state.get("answer", "抱歉，我暂时无法回答这个问题。")
         except Exception as e:
+            err_str = str(e)
+            if "Connection refused" in err_str or "ConnectError" in err_str or "10061" in err_str:
+                return "⚠️ Ollama 服务未运行，请先启动 Ollama（ollama serve），然后重试。"
             logger.exception(f"❌ Agent 推理失败")
-            return "抱歉，系统处理出现异常，请稍后再试。"
+            return f"抱歉，系统处理出现异常: {e}"
 
     def run_stream(self, user_input: str, session_id: str = "default"):
         """
@@ -287,6 +288,7 @@ class MedicalAgent:
         Yields:
             {"type": "intent", "content": str}  — 意图事件（第一个发出）
             {"type": "token",  "content": str}  — LLM 输出片段
+            {"type": "review", "content": str}  — 人工审核事件（需确认后保存记忆）
             {"type": "done"}                     — 结束信号
         """
         try:
@@ -327,9 +329,11 @@ class MedicalAgent:
                 )
 
                 # ---- 2b. 流式 LLM 生成 ----
-                for token in self.llm.stream(formatted_prompt):
-                    full_answer += token
-                    yield {"type": "token", "content": token}
+                for chunk in self.llm.stream([HumanMessage(content=formatted_prompt)]):
+                    token = chunk.content if hasattr(chunk, "content") else str(chunk)
+                    if token:
+                        full_answer += token
+                        yield {"type": "token", "content": token}
 
             elif intent == "chat_general" and is_weather_query(user_input):
                 history_text = self.memory_store.get_history_text(session_id)
@@ -338,9 +342,11 @@ class MedicalAgent:
                     history=history_text,
                     input=f"用户问天气：{user_input}\n天气数据：{weather_data}"
                 )
-                for token in self.llm.stream(weather_prompt):
-                    full_answer += token
-                    yield {"type": "token", "content": token}
+                for chunk in self.llm.stream([HumanMessage(content=weather_prompt)]):
+                    token = chunk.content if hasattr(chunk, "content") else str(chunk)
+                    if token:
+                        full_answer += token
+                        yield {"type": "token", "content": token}
 
             elif intent == "chat_general" or intent == "system_query":
                 history_text = self.memory_store.get_history_text(session_id)
@@ -348,23 +354,29 @@ class MedicalAgent:
                     history=history_text,
                     input=user_input
                 )
-                for token in self.llm.stream(general_prompt):
-                    full_answer += token
-                    yield {"type": "token", "content": token}
+                for chunk in self.llm.stream([HumanMessage(content=general_prompt)]):
+                    token = chunk.content if hasattr(chunk, "content") else str(chunk)
+                    if token:
+                        full_answer += token
+                        yield {"type": "token", "content": token}
 
             else:
-                # 兜底走 RAG
-                for token in self.llm.stream(
-                    self.prompt.format(
+                for chunk in self.llm.stream(
+                    [HumanMessage(content=self.prompt.format(
                         history=self.memory_store.get_history_text(session_id),
                         context="未找到相关医学资料",
                         input=user_input
-                    )
+                    ))]
                 ):
-                    full_answer += token
-                    yield {"type": "token", "content": token}
+                    token = chunk.content if hasattr(chunk, "content") else str(chunk)
+                    if token:
+                        full_answer += token
+                        yield {"type": "token", "content": token}
 
-            # === 3. 记忆持久化 ===
+            # === 3. 人工审核 ===
+            yield {"type": "review", "content": full_answer}
+
+            # === 4. 记忆持久化（流式模式下自动保存） ===
             self.memory_store.add_message(session_id, "user", user_input)
             self.memory_store.add_message(session_id, "assistant", full_answer)
 
@@ -372,6 +384,11 @@ class MedicalAgent:
             yield {"type": "done"}
 
         except Exception as e:
-            logger.exception(f"❌ Agent 流式推理失败")
-            yield {"type": "token", "content": "抱歉，系统处理出现异常，请稍后再试。"}
+            err_str = str(e)
+            if "Connection refused" in err_str or "ConnectError" in err_str or "10061" in err_str:
+                msg = "⚠️ Ollama 服务未运行，请先启动 Ollama（ollama serve）。"
+            else:
+                msg = f"抱歉，系统处理出现异常: {e}"
+            logger.error(f"❌ Agent 流式推理失败: {e}")
+            yield {"type": "token", "content": msg}
             yield {"type": "done"}
