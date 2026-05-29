@@ -357,29 +357,69 @@ class MedicalChatbot:
 
 ---
 
-### 7. 意图分类 — `src/service/intent_classifier.py`
+### 7. 意图分类 — `src/service/intent_classifier.py` + `bert_classifier.py`
 
-**原理**: 用 LLM（qwen2.5:7b）通过结构化 Prompt 输出 JSON。
+**双引擎分类器**: BERT 优先（~50ms），LLM 兜底（~2s），关键词规则保底。
 
-**Schema**:
+#### 引擎 1: BERT 分类器 (默认，推荐)
+
+**文件**: `src/service/bert_classifier.py`
+
+**原理**: sentence-transformers 多头匹配
+
+```
+用户查询
+  → sentence-transformers 编码为 768 维向量
+  → 与每个意图的预编码示例句向量计算余弦相似度
+  → 取最高分意图（阈值 < 0.45 时返回 unknown）
+```
+
+**预定义示例**:
+
+| 意图 | 示例句数 | 代表句 |
+|------|---------|--------|
+| medical_inquiry | 15 | "感冒了怎么办"、"头疼是什么原因" |
+| chat_general | 15 | "你好"、"今天天气怎么样" |
+| system_query | 10 | "这个系统有什么用"、"帮助" |
+
+**性能**: ~50ms/次（首次加载模型约 10s）
+
+**依赖**: `sentence-transformers` + `paraphrase-multilingual-MiniLM-L12-v2`
+
+#### 引擎 2: LLM 分类器 (回退)
+
+**文件**: `src/service/intent_classifier.py`
+
+当 `sentence-transformers` 未安装或 BERT 模型加载失败时，自动降级到 LLM。
+
+**原理**: OllamaLLM(qwen2.5:7b) + JSON Schema Prompt
+
 ```python
+# Schema
 {
     "intents": [
-        {"name": "medical_inquiry", "description": "医疗相关问题", "keywords": ["病", "症状", "药"]},
-        {"name": "chat_general",    "description": "闲聊",         "keywords": ["你好", "名字", "天气"]},
-        {"name": "system_query",    "description": "系统问题",     "keywords": ["功能", "系统", "帮助"]}
+        {"name": "medical_inquiry", "description": "医疗相关问题", ...},
+        {"name": "chat_general",    "description": "闲聊",         ...},
+        {"name": "system_query",    "description": "系统问题",     ...}
     ]
 }
 ```
 
-**规则**:
-1. 综合分析语义，不只是关键词匹配
-2. 医疗+闲聊混合输入 → 优先识别为 `medical_inquiry`
-3. 输出 JSON `{"intent": "medical_inquiry"}`，解析失败返回 `"unknown"`
+**性能**: ~2s/次
 
-**性能**:
-- 每次分类调用 LLM 一次，约 0.5-2s（取决于模型和硬件）
-- `unknown` 兜底走 RAG 流程，保证不会遗漏可能的医疗查询
+#### 引擎 3: 关键词规则 (终极兜底)
+
+当 LLM 也失败时（Ollama 不可用），使用关键词权重打分。
+
+#### 三引擎回退链
+
+```
+BERT 分类 (~50ms)
+  ├─ 成功 → 返回意图
+  └─ 失败 → LLM 分类 (~2s)
+              ├─ 成功 → 返回意图
+              └─ 失败 → 关键词规则 (<1ms) → 返回意图
+```
 
 ---
 
@@ -519,6 +559,66 @@ system_initializer.initialize_system()
    └──────────────────┘
 ```
 
+## Docker 部署
+
+项目提供 Docker Compose 一键部署脚本。
+
+### 文件结构
+
+```
+Dockerfile           — 多阶段构建（builder + runtime）
+docker-compose.yml   — 三服务编排（app + redis + ollama）
+.dockerignore        — 构建忽略清单
+```
+
+### 容器架构
+
+```
+┌─────────────────────────────────────────────────────┐
+│  docker-compose.yml                                  │
+│                                                      │
+│  ┌──────────────┐   ┌──────────┐   ┌──────────────┐ │
+│  │   app:8000   │   │  redis   │   │   ollama     │ │
+│  │ FastAPI +    │──→│ :6379    │   │ :11434       │ │
+│  │ LangGraph +  │   │ 对话记忆  │   │ LLM 推理     │ │
+│  │ ChromaDB     │   └──────────┘   │ 文本嵌入     │ │
+│  │ BERT 分类    │                  └──────────────┘ │
+│  └──────────────┘                                    │
+└─────────────────────────────────────────────────────┘
+```
+
+### 使用方式
+
+```bash
+# 1. 启动所有服务
+docker compose up -d
+
+# 2. 拉取 LLM 模型
+docker exec medical_chatbot_ollama ollama pull qwen2.5:7b
+docker exec medical_chatbot_ollama ollama pull nomic-embed-text
+
+# 3. 查看应用日志
+docker compose logs -f app
+
+# 4. 健康检查
+curl http://localhost:8000/api/chat/health
+
+# 5. 停止
+docker compose down
+```
+
+### 关键设计
+
+| 特性 | 实现方式 |
+|------|---------|
+| 环境变量 | `REDIS_HOST=redis` / `OLLAMA_BASE_URL=http://ollama:11434` |
+| 数据持久化 | `./data:/app/data`（ChromaDB + 疾病文档） |
+| GPU 加速 | NVIDIA Container Toolkit（docker-compose 中配置 device 保留） |
+| 健康检查 | `GET /api/chat/health` + Docker HEALTHCHECK |
+| 可选依赖 | `sentence-transformers` 可在容器内 `pip install` |
+
+---
+
 ## 外部依赖
 
 | 依赖 | 用途 | 许可证 |
@@ -548,7 +648,8 @@ system_initializer.initialize_system()
 ### 延迟
 | 阶段 | 估算耗时 | 说明 |
 |------|---------|------|
-| 意图分类 | ~0.5-2s | LLM 调用 |
+| 意图分类 (BERT) | ~50ms | sentence-transformers |
+| 意图分类 (LLM 回退) | ~0.5-2s | OllamaLLM 调用 |
 | 稠密检索 | ~50-200ms | ChromaDB 内存模式 |
 | BM25 检索 | ~10-50ms | 纯 CPU 计算 |
 | RRF 融合 | ~1-5ms | 内存计算 |

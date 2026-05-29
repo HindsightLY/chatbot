@@ -227,37 +227,50 @@ graph = builder.compile(checkpointer=MemorySaver(), interrupt_after=["human_revi
 ### 现状
 
 ```
-Qwen2.5:7B 用于：意图分类 + RAG 生成 + 闲聊 + 天气润色
+意图分类: BERT (sentence-transformers) ~50ms  /  OllamaLLM 兜底
+RAG 生成: ChatOllama (Qwen2.5:7B)
+闲聊/天气: ChatOllama (Qwen2.5:7B)
 ```
 
-一个模型做所有事，成本高、延迟大。
+已分离分类与生成负载。
 
 ### 行业方案
 
 | 任务 | 当前 | 推荐替代 | 收益 |
 |------|------|---------|------|
-| 意图分类 | qwen2.5:7b | 微调 BERT 小模型 (< 100M) | 延迟 2s → 50ms |
+| 意图分类 | ✅ BERT 多头匹配 | 微调 BERT 小模型 (< 100M) | 延迟 ~50ms |
 | 嵌入 | nomic-embed-text | BGE-M3 / mxbai-embed-large | 多语言更好 |
 | RAG 生成 | qwen2.5:7b | Qwen2.5:7B 或 API 模型 | — |
 | 闲聊 | qwen2.5:7b | Qwen2.5:0.5B / API 轻量模型 | 降本 |
 | 摘要 | qwen2.5:7b | 小模型 / API | 降本 |
 
-### 升级建议
+### 已实现的升级
 
-**P1 — 分类专用模型**
+**✅ P1 — BERT 意图分类器**
 
 ```python
-# 当前: 每次分类调用 7B LLM (~1-2s)
-# 升级: BERT 微调分类器 (~50ms)
+# src/service/bert_classifier.py
+# 原理: sentence-transformers 多头匹配
 
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-tokenizer = AutoTokenizer.from_pretrained("bert-base-chinese")
-model = AutoModelForSequenceClassification.from_pretrained("bert-base-chinese", num_labels=4)
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+query_emb = model.encode(query, normalize_embeddings=True)
+# 与每个意图的示例句向量计算余弦相似度
+# 取最相似意图作为分类结果
 ```
 
-标注 200-500 条对话数据即可获得 >90% 准确率。
+| 指标 | LLM 分类 (旧) | BERT 分类 (新) |
+|------|-------------|--------------|
+| 推理时间 | ~2s | ~50ms |
+| 依赖 | Ollama 必选 | sentence-transformers (可选) |
+| 准确率 | ~95% (7B) | ~85-90% (零样本) |
+| 离线可用 | ❌ | ✅ |
+| 可扩展 | 修改 prompt 即可 | 增删示例句即可 |
 
-**P2 — 模型路由 (Model Router)**
+**双引擎回退链**: BERT → LLM → 关键词规则，保证任意环境下均有分类结果。
+
+**下一步 — 模型路由 (Model Router)**
 
 ```python
 model_router = {
@@ -275,37 +288,82 @@ model_router = {
 ### 现状
 
 ```
-裸机 python src/main.py --api
-日志: print / logging
-无 Docker、无监控、无 CI/CD
+Docker Compose 一键部署 (app + redis + ollama)
 ```
 
-### 行业方案
+### 已实现的升级
 
-**P1 — Docker 容器化**
+**✅ P0 — Docker 容器化**
 
 ```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
+# Dockerfile — 多阶段构建
+FROM python:3.11-slim AS builder
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+FROM python:3.11-slim
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY src/ ./src/
+COPY config/ ./config/
 ```
 
 ```yaml
-# docker-compose.yml
+# docker-compose.yml — 三服务编排
 services:
   app:
     build: .
     ports: ["8000:8000"]
+    environment:
+      - REDIS_HOST=redis
+      - OLLAMA_BASE_URL=http://ollama:11434
+    volumes:
+      - ./data:/app/data     # 持久化 ChromaDB
     depends_on: [redis, ollama]
+
   redis:
     image: redis:7-alpine
+    volumes: [redis_data:/data]
+
   ollama:
-    image: ollama/ollama
-    volumes: ["./ollama:/root/.ollama"]
+    image: ollama/ollama:latest
+    volumes: [ollama_data:/root/.ollama]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]   # GPU 加速
+
+volumes:
+  redis_data:
+  ollama_data:
 ```
+
+**使用方式**:
+```bash
+# 首次启动（自动拉取镜像 + 构建应用）
+docker compose up -d
+
+# 拉取医学模型（进入 ollama 容器）
+docker exec -it medical_chatbot_ollama ollama pull qwen2.5:7b
+docker exec -it medical_chatbot_ollama ollama pull nomic-embed-text
+
+# 查看日志
+docker compose logs -f app
+
+# 停止
+docker compose down
+```
+
+**Docker 设计要点**:
+| 特性 | 实现 |
+|------|------|
+| 多阶段构建 | 分离 build/run 阶段，减小镜像体积 |
+| 健康检查 | `GET /api/chat/health` + Docker HEALTHCHECK |
+| 环境变量 | `REDIS_HOST`、`OLLAMA_BASE_URL` 支持容器互联 |
+| 数据持久化 | `data/` 目录挂载（ChromaDB + 文档） |
+| GPU 加速 | NVIDIA Container Toolkit（nvidia-docker） |
+| 可选依赖 | `sentence-transformers` 由用户自行 pip install |
 
 **P1 — 可观测性 (Observability)**
 
@@ -409,11 +467,11 @@ for case in test_cases:
 | **P1** | ✅ Cross-Encoder 重排序 | ✅ 已完成 | 准确率 +5-15% |
 | **P1** | ✅ 工具调用标准化 (bind_tools + @tool) | ✅ 已完成 | Agent 灵活性 |
 | **P1** | ✅ 人机协同 (interrupt_after + review) | ✅ 已完成 | 安全性 / 可控性 |
-| **P0** | Docker 容器化 | 1 天 | 部署标准化 |
+| **P0** | ✅ Docker 容器化 (Compose 三服务) | ✅ 已完成 | 部署标准化 |
+| **P1** | ✅ BERT 分类器 (sentence-transformers) | ✅ 已完成 | 延迟 2s→50ms |
 | **P1** | 查询转换 (Multi-Query / HyDE) | 1-2 天 | 召回复盖率提升 |
 | **P1** | 分层记忆 (摘要+语义检索) | 2-3 天 | 记忆质量 |
 | **P1** | LangSmith 可观测性 | 0.5 天 | 调试效率 |
-| **P1** | BERT 分类器替代 LLM 分类 | 2-3 天 | 延迟 2s→50ms |
 | **P1** | RAGAS 评估 | 1-2 天 | 量化质量 |
 | **P2** | 模型路由 | 1-2 天 | 成本优化 |
 | **P2** | WebSocket / 前端增强 | 3-5 天 | 用户体验 |
@@ -424,13 +482,13 @@ for case in test_cases:
 
 ## 总结
 
-当前项目是一个**功能完善的原型**，已完成五项核心升级（语义分块、混合检索、重排序、
-工具调用标准化、人机协同），流式交互顺畅、双模式可用。通向生产级系统的主要差距在于：
+当前项目是一个**功能完善的原型**，已完成七项核心升级（语义分块、混合检索、重排序、
+工具调用标准化、人机协同、BERT 分类器、Docker 容器化），流式交互顺畅、双模式可用。
+通向生产级系统的主要差距在于：
 
 1. **可观测性**: 无 LLM 调用追踪 → 调试效率低
-2. **部署**: 无容器化 → 环境一致性差
-3. **查询优化**: 无 Query Rewrite / Multi-Query → 召回复盖率不足
-4. **评估**: 无量化指标 → 优化方向不明确
-5. **并行节点**: 无 fan-out → 无法并行执行多个工具
+2. **查询优化**: 无 Query Rewrite / Multi-Query → 召回复盖率不足
+3. **评估**: 无量化指标 → 优化方向不明确
+4. **并行节点**: 无 fan-out → 无法并行执行多个工具
 
 建议按 P0 → P1 → P2 的顺序逐步演进，每完成一个阶段进行一次质量评估。

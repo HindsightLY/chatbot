@@ -34,7 +34,7 @@ class AppConfig(BaseModel):
 
     # ── LLM（生成 & 分类 & 闲聊） ──
     llm_model_name: str = "qwen2.5:7b"
-    llm_base_url: str = "http://localhost:11434"
+    llm_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     llm_temperature: float = 0.1
 
     # ── 嵌入模型 ──
@@ -52,6 +52,11 @@ class AppConfig(BaseModel):
     semantic_chunk_max_size: int = 800
     semantic_chunk_breakpoint_percentile: int = 80
 
+    # ── BERT 分类器 ──
+    use_bert_classifier: bool = True
+    bert_model_name: str = "paraphrase-multilingual-MiniLM-L12-v2"
+    bert_classifier_threshold: float = 0.45
+
     # ── 检索 ──
     retrieval_k: int = 6
     retrieval_score_threshold: float = 0.3
@@ -62,8 +67,8 @@ class AppConfig(BaseModel):
     rerank_top_k: int = 6
 
     # ── Redis 对话记忆 ──
-    redis_host: str = "127.0.0.1"
-    redis_port: int = 6379
+    redis_host: str = os.getenv("REDIS_HOST", "127.0.0.1")
+    redis_port: int = int(os.getenv("REDIS_PORT", "6379"))
     redis_db: int = 0
     redis_ttl: int = 86400
 

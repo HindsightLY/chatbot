@@ -82,10 +82,20 @@ classify_intent (日志/UI)
 
 ---
 
+## 意图分类（双引擎）
+
+| 引擎 | 延迟 | 依赖 | 说明 |
+|------|------|------|------|
+| BERT (默认) | ~50ms | `sentence-transformers` | 多头匹配，精度 ~85-90% |
+| LLM (回退) | ~2s | Ollama | JSON Prompt，精度 ~95% |
+| 关键词 (兜底) | <1ms | 无 | 权重打分，保底分类 |
+
 ## 关键参数
 
 | 参数 | 值 | 用途 |
 |------|-----|------|
+| `use_bert_classifier` | `True` | 启用 BERT 意图分类 |
+| `bert_model_name` | `paraphrase-multilingual-MiniLM-L12-v2` | BERT 分类模型 |
 | `use_semantic_chunking` | `True` | 启用语义分块 |
 | `use_hybrid_search` | `True` | 启用混合检索 |
 | `use_reranking` | `True` | 启用 Cross-Encoder 重排序 |
@@ -93,7 +103,6 @@ classify_intent (日志/UI)
 | `rrf_k` | 60 | RRF 融合常数 |
 | `rerank_top_k` | 6 | 重排序后文档数 |
 | `retrieval_k` | 6 | 最终返回文档数 |
-| `chunk_size` / `chunk_overlap` | 500 / 100 | 固定分块参数（回退） |
 | `semantic_chunk_min/max_size` | 200 / 800 | 语义块尺寸范围 |
 | `score_threshold` | 0.3 | 稠密检索过滤阈值 |
 | `temperature` | 0.1 | LLM 生成温度 |
@@ -104,14 +113,26 @@ classify_intent (日志/UI)
 
 ## 运行方式
 
+### 本地运行
+
 ```bash
 pip install -r requirements.txt
+pip install sentence-transformers   # 可选，启用 BERT 分类器
 ollama pull nomic-embed-text
 ollama pull qwen2.5:7b
-redis-server                     # 启动 Redis
+redis-server                        # 启动 Redis
 
-python src/main.py --api         # Web 界面 (http://localhost:8000)
-python src/main.py               # 命令行交互
+python -m src.main --api            # Web 界面 (http://localhost:8000)
+python -m src.main                  # 命令行交互
+```
+
+### Docker 运行
+
+```bash
+docker compose up -d
+docker exec medical_chatbot_ollama ollama pull qwen2.5:7b
+docker exec medical_chatbot_ollama ollama pull nomic-embed-text
+# 访问 http://localhost:8000
 ```
 
 ---

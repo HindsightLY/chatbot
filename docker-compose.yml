@@ -1,0 +1,75 @@
+# ============================================================
+# 医疗咨询 AI — Docker Compose
+# 一键启动: app + redis + ollama
+# ============================================================
+# 使用方式:
+#   docker compose up -d              # 后台启动
+#   docker compose logs -f app        # 查看应用日志
+#   docker compose down               # 停止
+# ============================================================
+
+services:
+  # ---- FastAPI 应用 ----
+  app:
+    build: .
+    container_name: medical_chatbot
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # 挂载数据目录（持久化 ChromaDB、文档）
+      - ./data:/app/data
+      # 配置文件（可选覆盖）
+      - ./config:/app/config:ro
+    depends_on:
+      redis:
+        condition: service_started
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/chat/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---- Redis 对话记忆 ----
+  redis:
+    image: redis:7-alpine
+    container_name: medical_chatbot_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ---- Ollama LLM 服务 ----
+  ollama:
+    image: ollama/ollama:latest
+    container_name: medical_chatbot_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  redis_data:
+  ollama_data:

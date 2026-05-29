@@ -1,0 +1,51 @@
+# ============================================================
+# Docker 构建忽略清单
+# ============================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 数据（由 volume 挂载，不打包进镜像）
+data/
+
+# 文档（非运行时必需）
+*.md
+*.mdx
+!README.md
+
+# 测试
+test_*.py
+debug_*.py
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# 配置
+.env
+*.env
