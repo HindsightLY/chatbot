@@ -24,6 +24,8 @@ from config.app_config import APP_CONFIG
 from src.tools.medical_tools import tools
 from src.utils.logger_config import logger
 from src.utils.text_utils import is_weather_query
+from src.service.hyde_transformer import HyDEQueryTransformer
+from src.service.memory_summarizer import MemorySummarizer
 
 
 class AgentState(TypedDict):
@@ -67,6 +69,9 @@ class MedicalAgent:
         )
 
         self.llm_with_tools = self.llm.bind_tools(tools)
+
+        self.hyde = HyDEQueryTransformer(llm=self.llm) if APP_CONFIG.use_hyde else None
+        self.memory_summarizer = MemorySummarizer(memory_store=memory_store, llm=self.llm) if APP_CONFIG.use_hierarchical_memory else None
 
         self.prompt = PromptTemplate.from_template(
             """你是一位专业医疗顾问。请根据以下医学资料和对话历史回答用户问题。
@@ -121,7 +126,12 @@ class MedicalAgent:
         LLM 自主决定是否调用工具，或直接生成回答。
         """
         messages = state.get("messages", [])
-        history_text = self.memory_store.get_history_text(state["session_id"])
+        if self.memory_summarizer:
+            history_text = self.memory_summarizer.get_enhanced_history(
+                state["session_id"], last_content
+            )
+        else:
+            history_text = self.memory_store.get_history_text(state["session_id"])
 
         last_content = ""
         if messages and isinstance(messages[-1], dict):
@@ -200,6 +210,10 @@ class MedicalAgent:
 
         self.memory_store.add_message(state["session_id"], "user", last_user_msg)
         self.memory_store.add_message(state["session_id"], "assistant", state.get("answer", ""))
+
+        if self.memory_summarizer:
+            self.memory_summarizer.check_and_summarize(state["session_id"])
+
         return {**state, "human_approved": True}
 
     # ────────── 路由 ──────────
@@ -301,17 +315,23 @@ class MedicalAgent:
 
             # === 2. 按意图路由 ===
             if intent == "medical_inquiry" or intent == "unknown":
-                # ---- 2a. 混合检索文档 ----
+                # ---- 2a. HyDE 查询转换 ----
+                search_query = user_input
+                if self.hyde:
+                    hyde_query = self.hyde.transform(user_input)
+                    search_query = hyde_query
+
+                # ---- 2b. 混合检索文档 ----
                 docs = []
                 if self.vector_store:
                     try:
                         if APP_CONFIG.use_hybrid_search:
                             results = self.vector_store.hybrid_search(
-                                user_input, k=APP_CONFIG.retrieval_k
+                                search_query, k=APP_CONFIG.retrieval_k
                             )
                         else:
                             results = self.vector_store.similarity_search(
-                                user_input, k=APP_CONFIG.retrieval_k,
+                                search_query, k=APP_CONFIG.retrieval_k,
                                 score_threshold=APP_CONFIG.retrieval_score_threshold
                             )
                         docs = [doc.page_content for doc in results]
@@ -320,7 +340,12 @@ class MedicalAgent:
                         logger.exception(f"❌ 检索失败")
 
                 context_text = "\n\n".join(docs) or "未找到相关医学资料"
-                history_text = self.memory_store.get_history_text(session_id)
+                if self.memory_summarizer:
+                    history_text = self.memory_summarizer.get_enhanced_history(
+                        session_id, user_input
+                    )
+                else:
+                    history_text = self.memory_store.get_history_text(session_id)
 
                 formatted_prompt = self.prompt.format(
                     history=history_text,
@@ -328,7 +353,7 @@ class MedicalAgent:
                     input=user_input
                 )
 
-                # ---- 2b. 流式 LLM 生成 ----
+                # ---- 2c. 流式 LLM 生成 ----
                 for chunk in self.llm.stream([HumanMessage(content=formatted_prompt)]):
                     token = chunk.content if hasattr(chunk, "content") else str(chunk)
                     if token:
@@ -336,7 +361,12 @@ class MedicalAgent:
                         yield {"type": "token", "content": token}
 
             elif intent == "chat_general" and is_weather_query(user_input):
-                history_text = self.memory_store.get_history_text(session_id)
+                if self.memory_summarizer:
+                    history_text = self.memory_summarizer.get_enhanced_history(
+                        session_id, user_input
+                    )
+                else:
+                    history_text = self.memory_store.get_history_text(session_id)
                 weather_data = self.tool_manager.get_weather_response(user_input)
                 weather_prompt = self.general_prompt.format(
                     history=history_text,
@@ -349,7 +379,12 @@ class MedicalAgent:
                         yield {"type": "token", "content": token}
 
             elif intent == "chat_general" or intent == "system_query":
-                history_text = self.memory_store.get_history_text(session_id)
+                if self.memory_summarizer:
+                    history_text = self.memory_summarizer.get_enhanced_history(
+                        session_id, user_input
+                    )
+                else:
+                    history_text = self.memory_store.get_history_text(session_id)
                 general_prompt = self.general_prompt.format(
                     history=history_text,
                     input=user_input
@@ -361,9 +396,15 @@ class MedicalAgent:
                         yield {"type": "token", "content": token}
 
             else:
+                if self.memory_summarizer:
+                    history_text = self.memory_summarizer.get_enhanced_history(
+                        session_id, user_input
+                    )
+                else:
+                    history_text = self.memory_store.get_history_text(session_id)
                 for chunk in self.llm.stream(
                     [HumanMessage(content=self.prompt.format(
-                        history=self.memory_store.get_history_text(session_id),
+                        history=history_text,
                         context="未找到相关医学资料",
                         input=user_input
                     ))]
@@ -379,6 +420,9 @@ class MedicalAgent:
             # === 4. 记忆持久化（流式模式下自动保存） ===
             self.memory_store.add_message(session_id, "user", user_input)
             self.memory_store.add_message(session_id, "assistant", full_answer)
+
+            if self.memory_summarizer:
+                self.memory_summarizer.check_and_summarize(session_id)
 
             logger.info(f"💡 流式生成完成，长度: {len(full_answer)}")
             yield {"type": "done"}

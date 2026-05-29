@@ -21,7 +21,7 @@
 |------|---------|---------|------|
 | 检索方式 | ✅ BM25 + Dense (RRF 融合) | 混合检索 | ✅ 已实现 |
 | 重排序 | ✅ MiniLM Cross-Encoder | Cohere Rerank / BGE-Reranker | ⚠️ 小模型, 可升级 |
-| 查询转换 | ❌ 无 | HyDE / Multi-Query / Query Rewrite | ❌ |
+| 查询转换 | ✅ HyDE (LLM 生成假设文档) | HyDE / Multi-Query / Query Rewrite | ✅ 已实现 |
 | 分块策略 | ✅ 语义分块 (Semantic Chunker) | 语义分块 / 递归 LLM 分块 | ✅ 已实现 |
 
 ### 已实现的升级
@@ -61,20 +61,26 @@ pip install sentence-transformers   # 可选；未安装时静默跳过重排序
 
 实现文件: `src/service/vector_store.py` — `reranker` 属性 + `hybrid_search()` 中的重排序步骤
 
-### 下一步
+**✅ P1 — HyDE 查询转换**
 
-**P1 — 查询转换 (Query Transformation)**
-
-```python
-# Multi-Query: 用 LLM 生成 N 个同义查询，分别检索后去重合并
-def multi_query(query: str) -> List[str]:
-    prompt = f"请为以下问题生成 3 个不同角度的同义问句：\n{query}"
-    return llm.invoke(prompt).split("\n")
-
-# HyDE: 先生成假设文档，用假设文档检索
-def hyde(query: str) -> str:
-    return llm.invoke(f"请针对以下问题写一段医学回答：\n{query}")
 ```
+用户查询 → LLM 生成假设医学回答 → 假设文档嵌入 → 替代原始查询进行稠密检索
+```
+
+| 阶段 | 传统 (无 HyDE) | HyDE |
+|------|---------------|------|
+| 查询 | "头痛怎么办" | "患者出现头痛症状，可能原因包括紧张性头痛、偏头痛等..." |
+| 嵌入空间 | 短查询 (5-20 字) | 长文档 (100-300 字) |
+| 检索匹配 | 可能遗漏专业术语 | 与知识库文档语义更接近 |
+
+**设计要点**:
+- 仅用于稠密检索阶段 (ChromaDB 余弦相似度)
+- BM25 稀疏检索仍使用原始查询（关键词匹配不受益于 HyDE）
+- 图路径 (`call_model`): 工具 `search_medical_knowledge` 内部自动应用 HyDE
+- 流式路径 (`run_stream`): medical_inquiry 分支在 `hybrid_search()` 前执行 HyDE
+- LLM 生成失败时静默回退原始查询
+
+实现文件: `src/service/hyde_transformer.py` — `HyDEQueryTransformer.transform()`
 
 ---
 
@@ -119,32 +125,48 @@ Redis List: chat:{sid}:messages → lrange → 拼接为文本
 
 | 维度 | 当前方案 | Mem0 | MemGPT/Letta | LangGraph Persistence |
 |------|---------|------|-------------|----------------------|
-| 短期记忆 | Redis List | Buffer | Buffer | LangGraph Checkpoint |
-| 长期记忆 | ❌ | 向量化存储 | 递归摘要 | 自定义 |
-| 记忆检索 | ❌ | 语义搜索 | 实体抽取 | ❌ 需自行实现 |
-| 记忆合并 | ❌ | 主动合并 | 递归压缩 | ❌ |
+| 短期记忆 | ✅ Redis List | Buffer | Buffer | LangGraph Checkpoint |
+| 长期记忆 | ✅ Redis + 摘要 + 语义检索 | 向量化存储 | 递归摘要 | 自定义 |
+| 记忆检索 | ✅ 语义搜索 (OllamaEmbeddings) | 语义搜索 | 实体抽取 | ❌ 需自行实现 |
+| 记忆合并 | ✅ 摘要 + Ltrim | 主动合并 | 递归压缩 | ❌ |
 
-### 升级建议
+### 已实现的升级
 
-**P1 — 分层记忆架构**
+**✅ P1 — 分层记忆 (Hierarchical Memory)**
 
 ```
-短期 (Current Session): Redis ZSET / list → 最近 3 轮完整对话
-中期 (Last Sessions):    Redis + ChromaDB → 上一会话的摘要向量存储
-长期 (User Profile):     ChromaDB → 用户偏好 / 禁忌 / 个人信息的语义检索
+近期记忆 (Redis List):  最近 10 轮原始对话 → 拼接为 prompt 上下文
+历史摘要 (Redis List:summaries):
+  当消息数 > memory_summary_turns (默认 20)：
+    1. 取最早 20 条消息 → LLM 摘要
+    2. 摘要存入 Redis
+    3. Ltrim 裁剪已摘要消息
+检索 (OllamaEmbeddings):
+  当前查询 → 嵌入 → 与所有摘要余弦相似度排序 → Top-K 相关摘要注入 prompt
 ```
 
-**P1 — 记忆摘要 (Memory Consolidation)**
-
-当对话轮数超过阈值时，触发 LLM 摘要：
+**设计要点**:
+- 摘要使用医学领域定制 Prompt，保留症状/诊断/用药等关键信息
+- 语义检索使用 `OllamaEmbeddings(nomic-embed-text)` 计算余弦相似度
+- 嵌入不可用时回退返回全部摘要的前 K 条（关键词匹配兜底）
+- `get_enhanced_history()` 集成到 Agent 所有分支（run + run_stream）
+- 图路径的 `_call_model` 和 `_save_memory` 均触发摘要检查
 
 ```python
-# 每 20 轮对话后压缩历史
-if turn_count % 20 == 0:
-    summary = llm.invoke(f"请总结以下对话中提到的所有重要信息：\n{history_text}")
-    memory_store.save_summary(session_id, summary)
-    memory_store.trim_messages(session_id, keep_last=5)  # 只保留最近 5 轮
+# src/service/memory_summarizer.py — 核心方法
+def get_enhanced_history(session_id, query) -> str:
+    recent = memory_store.get_history_text(session_id)  # 近期对话
+    summaries = retrieve_relevant_summaries(session_id, query)  # 语义检索摘要
+    return recent + "\n【历史摘要】" + "\n".join(summaries)
+
+def check_and_summarize(session_id):
+    if len(messages) >= memory_summary_turns:
+        summary = llm.invoke(SUMMARY_PROMPT.format(conversation=oldest))
+        memory_store.store_summary(session_id, summary)
+        memory_store.trim(session_id, keep_last=5)
 ```
+
+实现文件: `src/service/memory_summarizer.py`
 
 ---
 
@@ -469,8 +491,8 @@ for case in test_cases:
 | **P1** | ✅ 人机协同 (interrupt_after + review) | ✅ 已完成 | 安全性 / 可控性 |
 | **P0** | ✅ Docker 容器化 (Compose 三服务) | ✅ 已完成 | 部署标准化 |
 | **P1** | ✅ BERT 分类器 (sentence-transformers) | ✅ 已完成 | 延迟 2s→50ms |
-| **P1** | 查询转换 (Multi-Query / HyDE) | 1-2 天 | 召回复盖率提升 |
-| **P1** | 分层记忆 (摘要+语义检索) | 2-3 天 | 记忆质量 |
+| **P1** | ✅ HyDE 查询转换 | ✅ 已完成 | 召回复盖率提升 |
+| **P1** | ✅ 分层记忆 (摘要+语义检索) | ✅ 已完成 | 记忆质量 |
 | **P1** | LangSmith 可观测性 | 0.5 天 | 调试效率 |
 | **P1** | RAGAS 评估 | 1-2 天 | 量化质量 |
 | **P2** | 模型路由 | 1-2 天 | 成本优化 |
@@ -482,13 +504,13 @@ for case in test_cases:
 
 ## 总结
 
-当前项目是一个**功能完善的原型**，已完成七项核心升级（语义分块、混合检索、重排序、
-工具调用标准化、人机协同、BERT 分类器、Docker 容器化），流式交互顺畅、双模式可用。
+当前项目是一个**功能完善的原型**，已完成九项核心升级（语义分块、混合检索、重排序、
+工具调用标准化、人机协同、BERT 分类器、Docker 容器化、HyDE 查询转换、分层记忆），
+流式交互顺畅、双模式可用。
 通向生产级系统的主要差距在于：
 
 1. **可观测性**: 无 LLM 调用追踪 → 调试效率低
-2. **查询优化**: 无 Query Rewrite / Multi-Query → 召回复盖率不足
-3. **评估**: 无量化指标 → 优化方向不明确
-4. **并行节点**: 无 fan-out → 无法并行执行多个工具
+2. **评估**: 无量化指标 → 优化方向不明确
+3. **并行节点**: 无 fan-out → 无法并行执行多个工具
 
 建议按 P0 → P1 → P2 的顺序逐步演进，每完成一个阶段进行一次质量评估。

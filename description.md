@@ -64,6 +64,10 @@
 | 检索 | `rrf_k` | `60` | RRF 融合常数 |
 | 检索 | `use_reranking` | `True` | 启用 Cross-Encoder 重排序 |
 | 检索 | `rerank_top_k` | `6` | 重排序后取 Top-K |
+| HyDE | `use_hyde` | `True` | 启用 HyDE 查询转换 |
+| 记忆 | `use_hierarchical_memory` | `True` | 启用分层记忆 |
+| 记忆 | `memory_summary_turns` | `20` | 多少轮后触发摘要 |
+| 记忆 | `memory_retrieval_k` | `3` | 检索相关摘要数量 |
 | 分块 | `chunk_size` / `chunk_overlap` | `500` / `100` | 固定分块参数（回退） |
 | 分块 | `use_semantic_chunking` | `True` | 启用语义分块 |
 | 分块 | `semantic_chunk_min_size` | `200` | 语义块最小字符数 |
@@ -124,6 +128,10 @@ RecursiveCharacterTextSplitter
 
 ```
 用户查询
+  │
+  ├─ Step 0 (可选): HyDE 查询转换
+  │     LLM 生成假设医学回答 → 替代原始查询进行稠密检索
+  │     仅用于稠密阶段；BM25 仍使用原始查询
   │
   ├─ Step 1: 稠密检索 (ChromaDB)
   │     similarity_search_with_relevance_scores(query, k=20)
@@ -189,9 +197,11 @@ VectorStoreManager
 
 ---
 
-### 4. 对话记忆 — `src/service/memory_store.py`
+### 4. 对话记忆 — `src/service/memory_store.py` + `memory_summarizer.py`
 
-**职责**: 基于 Redis 的多轮会话记忆存储。
+**职责**: 基于 Redis 的多轮会话记忆存储 + 分层记忆管理。
+
+#### 近期记忆 (MemoryStore)
 
 **数据结构**:
 ```
@@ -217,6 +227,36 @@ TTL:   86400s (每次 rpush 时刷新)
 - List 结构天然按时序追加，正好对应对话流
 - TTL 自动过期，无需手动清理
 - 相比原 HybridChatMemory（FAISS+内存），外部化存储支持多进程共享
+
+#### 历史摘要 (MemorySummarizer)
+
+**文件**: `src/service/memory_summarizer.py`
+
+当消息数 > `memory_summary_turns`（默认 20）时触发分层记忆：
+
+```
+近期对话 (Redis List)
+  → 取最旧 20 条
+  → LLM 生成医学摘要（保留症状/诊断/用药等关键信息）
+  → summary 存入 Redis List (chat:{sid}:summaries)
+  → Ltrim 裁剪已摘要的原始消息
+```
+
+**语义检索**: 每次查询时，将用户问题嵌入后与所有已存储摘要计算余弦相似度，
+取 Top-K 相关摘要拼入 prompt 上下文。
+
+**集成方式**:
+
+```python
+# agent.py — 替代原有 get_history_text
+if self.memory_summarizer:
+    history_text = self.memory_summarizer.get_enhanced_history(session_id, query)
+else:
+    history_text = self.memory_store.get_history_text(session_id)
+
+# 每次消息写入后检查是否需要摘要
+self.memory_summarizer.check_and_summarize(session_id)
+```
 
 ---
 
@@ -276,7 +316,7 @@ save_memory (记忆持久化)
 
 | 工具 | 函数 | 触发条件 |
 |------|------|---------|
-| `search_medical_knowledge(query)` | ChromaDB 混合检索 | 医疗相关问题 |
+| `search_medical_knowledge(query)` | HyDE 转换 → ChromaDB 混合检索 | 医疗相关问题 |
 | `get_weather(location)` | 高德天气 API | 天气查询 |
 | `chat_general(query)` | ChatOllama 直接回答 | 闲聊/系统查询 |
 
@@ -296,16 +336,17 @@ save_memory (记忆持久化)
 意图分类
   │
   ├── medical_inquiry / unknown
-  │     → ChromaDB 检索
-  │     → self.prompt + history + context
+  │     → HyDE 查询转换（LLM 生成假设文档）
+  │     → ChromaDB 混合检索（使用 HyDE 文档嵌入）
+  │     → self.prompt + enhanced_history + context
   │     → ChatOllama.stream(formatted_prompt)
   │
   ├── chat_general + 天气
-  │     → get_weather_response() → self.general_prompt + history
+  │     → get_weather_response() → self.general_prompt + enhanced_history
   │     → ChatOllama.stream()
   │
   ├── chat_general / system_query
-  │     → self.general_prompt + history + input
+  │     → self.general_prompt + enhanced_history + input
   │     → ChatOllama.stream()
   │
   ├── review event
@@ -314,14 +355,21 @@ save_memory (记忆持久化)
   │     → SSE: 前端可调用 /api/chat/review 记录审核结果
   │
   └── save_memory → add_message(user + assistant)
+      → check_and_summarize()（≥20 轮时触发摘要）
 ```
+
+> `enhanced_history` = 近期对话 + 语义检索到的相关历史摘要 (MemorySummarizer)
+> `HyDE` 仅在 medical_inquiry 分支的稠密检索阶段生效，BM25 仍使用原始查询
 
 **LangGraph 图执行 (run)** — 完整图拓扑，含工具调用 + 人机协同：
 
 ```
 classify_intent → call_model → conditional
   ├─ tool_calls → tool_node → call_model (循环)
+  │     └─ search_medical_knowledge 内部应用 HyDE 转换
   └─ 无工具调用 → human_review (interrupt_after) → save_memory → END
+      └─ call_model 中使用 enhanced_history（含摘要检索）
+      └─ save_memory 后触发 check_and_summarize（分层记忆）
 ```
 
 **编译参数**:
@@ -650,13 +698,15 @@ docker compose down
 |------|---------|------|
 | 意图分类 (BERT) | ~50ms | sentence-transformers |
 | 意图分类 (LLM 回退) | ~0.5-2s | OllamaLLM 调用 |
+| HyDE 生成 | ~0.5-2s | ChatOllama 生成假设文档 |
 | 稠密检索 | ~50-200ms | ChromaDB 内存模式 |
 | BM25 检索 | ~10-50ms | 纯 CPU 计算 |
 | RRF 融合 | ~1-5ms | 内存计算 |
 | Cross-Encoder 重排序 | ~100-500ms | CPU 推理（MiniLM） |
+| 摘要语义检索 | ~50-200ms | OllamaEmbeddings 余弦相似度 |
 | LLM 生成（首 token） | ~1-3s | 7B 模型 |
 | LLM 生成（后续 token） | ~30-60ms/token | 取决于推理硬件 |
-| **端到端（SSE）** | **~2-5s 首 token, 4-12s 完成** | |
+| **端到端（SSE）** | **~2.5-7s 首 token, 5-15s 完成** |（含 HyDE + 摘要检索）|
 
 ### 优化方向
 1. **缓存频繁意图分类结果**

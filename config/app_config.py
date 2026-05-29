@@ -57,6 +57,10 @@ class AppConfig(BaseModel):
     bert_model_name: str = "paraphrase-multilingual-MiniLM-L12-v2"
     bert_classifier_threshold: float = 0.45
 
+    # ── HyDE 查询转换 ──
+    use_hyde: bool = True
+    hyde_temperature: float = 0.1
+
     # ── 检索 ──
     retrieval_k: int = 6
     retrieval_score_threshold: float = 0.3
@@ -71,6 +75,12 @@ class AppConfig(BaseModel):
     redis_port: int = int(os.getenv("REDIS_PORT", "6379"))
     redis_db: int = 0
     redis_ttl: int = 86400
+
+    # ── 分层记忆 ──
+    use_hierarchical_memory: bool = True
+    memory_summary_turns: int = 20
+    memory_summary_max_age: int = 30
+    memory_retrieval_k: int = 3
 
     # ── ChromaDB ──
     chroma_collection_name: str = "medical_docs"

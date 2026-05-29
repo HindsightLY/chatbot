@@ -44,8 +44,13 @@ def search_medical_knowledge(query: str) -> str:
         return "医学知识库暂未就绪，无法检索。"
 
     try:
+        search_query = query
+        if APP_CONFIG.use_hyde:
+            from src.service.hyde_transformer import hyde_transformer
+            hyde_query = hyde_transformer.transform(query)
+            search_query = hyde_query
         if APP_CONFIG.use_hybrid_search:
-            results = vs.hybrid_search(query, k=APP_CONFIG.retrieval_k)
+            results = vs.hybrid_search(search_query, k=APP_CONFIG.retrieval_k)
         else:
             results = vs.similarity_search(
                 query, k=APP_CONFIG.retrieval_k,
