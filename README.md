@@ -12,14 +12,14 @@
 - Redis 服务已启动（默认 `127.0.0.1:6379`）
 
 ```bash
-# 1. 安装依赖
+# 1. 拉取模型
 ollama pull nomic-embed-text
 ollama pull qwen2.5:7b
 
 # 2. 安装 Python 包
 pip install -r requirements.txt
 
-# 3. 启动
+# 3. 启动 API 模式
 python src/main.py --api    # 浏览器自动打开 http://localhost:8000
 ```
 
@@ -45,14 +45,18 @@ medical_chatbot/
 │   │   └── cli_router.py       # 命令行交互循环
 │   ├── service/
 │   │   ├── agent.py            # LangGraph Agent（状态图 + 流式推理）
-│   │   ├── chatbot.py          # 聊天机器人包装器
-│   │   ├── vector_store.py     # ChromaDB 创建 / 加载 / 检索
+│   │   ├── chatbot.py          # get_chatbot_agent() 工厂函数（向后兼容）
+│   │   ├── vector_store.py     # ChromaDB 创建/加载/混合检索
 │   │   ├── memory_store.py     # Redis 对话记忆
-│   │   ├── document_loader.py  # 文档加载与分块
-│   │   ├── intent_classifier.py# LLM 意图分类
+│   │   ├── memory_summarizer.py# 分层记忆（摘要+语义检索）
+│   │   ├── document_loader.py  # 文档加载与语义分块
+│   │   ├── hyde_transformer.py # HyDE 查询转换（LLM 生成假设文档）
+│   │   ├── intent_classifier.py# 三引擎意图分类（BERT/LLM/关键词）
+│   │   ├── bert_classifier.py  # BERT 分类器（sentence-transformers 多头匹配）
 │   │   ├── tool_manager.py     # 天气 & 闲聊处理器
-│   │   └── system_initializer.py# 组件依赖注入组装
+│   │   └── system_initializer.py# 组件依赖注入组装（按序初始化）
 │   ├── tools/
+│   │   ├── medical_tools.py    # LangChain @tool 装饰器定义（3 个工具）
 │   │   ├── weather_tool.py     # 高德天气 API
 │   │   └── news_tool.py        # 聚合数据新闻 API
 │   ├── static/
@@ -72,9 +76,9 @@ medical_chatbot/
 
 ```
 用户输入
-  → IntentClassifier.classify()   (LLM 分类: medical / chat / system)
+  → IntentClassifier.classify()   (三引擎: BERT / LLM / 关键词)
     ├─ medical_inquiry / unknown
-    │     → ChromaDB 检索医学文档
+    │     → (可选) HyDE 查询转换 → ChromaDB 混合检索(BM25+Dense+RRF+Cross-Encoder)
     │     → LLM 生成回答 (对话历史 + 医学文档 + 当前问题)
     │     → Redis 保存本轮问答
     │
@@ -87,15 +91,19 @@ medical_chatbot/
           → Redis 保存
 ```
 
+所有分支：
+  - **流式路径** (`agent.run_stream`): 直接走条件分支 + `ChatOllama.stream()`，逐 token 产出，自动保存记忆
+  - **同步路径** (`agent.run`): 走 LangGraph StateGraph（支持工具调用 + `human_review` 中断），执行到 END 后返回完整回答
+
 ### 流式 SSE 协议
 
 ```javascript
-// 前端接收格式
+// 前端接收格式（仅三个事件类型）
 data: {"intent":"medical_inquiry"}   // 意图事件（首个）
 data: "头痛"                          // 逐 token，JSON 字符串
 data: "可能"
 ...
-data: [DONE]                          // 终止
+data: [DONE]                          // 终止信号
 ```
 
 ## API 接口
@@ -126,6 +134,14 @@ curl -X POST http://localhost:8000/api/chat/daily_news \
   -d '{"news_type": "top"}'
 ```
 
+### `GET /api/chat/health` — 健康检查
+
+```bash
+curl http://localhost:8000/api/chat/health
+
+# 响应: {"status":"ok","components":{"vector_store":true,...},"errors":[]}
+```
+
 ## 技术栈
 
 | 组件 | 选型 | 说明 |
@@ -136,7 +152,10 @@ curl -X POST http://localhost:8000/api/chat/daily_news \
 | 向量数据库 | ChromaDB | 持久化到磁盘 |
 | 对话记忆 | Redis | List 结构，TTL 24h |
 | Agent 框架 | LangGraph | StateGraph 多节点编排 |
-| 文档分块 | RecursiveCharacterTextSplitter | 中文标点递归分割 |
+| 文档分块 | SemanticChunker（语义分块） | 余弦距离断点 |
+| 检索策略 | BM25 + Dense + RRF + Cross-Encoder | 四阶段混合检索 |
+| 查询转换 | HyDE | LLM 生成假设文档 |
+| 意图分类 | BERT / LLM / 关键词（三引擎回退） | 50ms / 2s / <1ms |
 | 前端 | 原生 HTML + Fetch ReadableStream | 无框架依赖 |
 | 外部 API | 高德天气 / 聚合数据新闻 | 可选 |
 
@@ -149,7 +168,10 @@ curl -X POST http://localhost:8000/api/chat/daily_news \
 | `llm_model_name` | `qwen2.5:7b` | 生成模型 |
 | `llm_temperature` | `0.1` | 回复一致性 |
 | `retrieval_k` | `6` | 检索文档数 |
-| `retrieval_score_threshold` | `0.3` | 相似度阈值 |
+| `use_hybrid_search` | `True` | 启用混合检索 |
+| `use_reranking` | `True` | 启用 Cross-Encoder 重排序 |
+| `use_hyde` | `True` | 启用 HyDE 查询转换 |
+| `use_hierarchical_memory` | `True` | 启用分层记忆 |
 | `chunk_size` | `500` | 文档分块大小 |
 | `redis_ttl` | `86400` | 记忆过期时间(秒) |
 

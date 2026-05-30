@@ -41,7 +41,7 @@ RAG（Retrieval-Augmented Generation）核心思想：**让 LLM 在回答前先�
   → 返回 List[Document] → extract page_content → context_text
 ```
 
-**文件**: `vector_store.py:hybrid_search()` → `agent.py:_retrieve_docs()`
+**文件**: `vector_store.py:hybrid_search()` → `agent.py:run_stream()`（medical_inquiry 分支）
 
 ### 3. 生成（Generation）
 
@@ -62,7 +62,47 @@ PromptTemplate(
 
 ---
 
-## Agent 架构（LangGraph StateGraph）
+## Agent 架构
+
+### 流式路径 (`run_stream`) — 不走 LangGraph 图，直接条件分支 + `ChatOllama.stream()`
+
+```
+意图分类 (IntentClassifier)
+  │
+  ├── medical_inquiry / unknown
+  │     → (可选) HyDE → ChromaDB 混合检索
+  │     → history = enhanced_history（含语义检索到的摘要）
+  │     → self.prompt + history + context → LLM.stream()
+  │
+  ├── chat_general + 天气
+  │     → tool_manager.get_weather_response()
+  │     → history = enhanced_history
+  │     → self.general_prompt + history → LLM.stream()
+  │
+  ├── chat_general / system_query
+  │     → history = enhanced_history
+  │     → self.general_prompt + history → LLM.stream()
+  │
+  └── 其他（兜底）
+        → self.prompt + "未找到相关医学资料" + history → LLM.stream()
+
+  ↓ 所有分支结束后自动执行
+  自动保存记忆 → add_message(user + assistant)
+    → check_and_summarize()    (分层记忆摘要，≥20 轮时触发)
+  → yield {"type": "done"}
+```
+
+**产出事件**（仅三个类型）:
+| 事件 | 格式 | 说明 |
+|------|------|------|
+| `intent` | `{"type":"intent","content":"medical_inquiry"}` | 意图分类结果（首个事件） |
+| `token` | `{"type":"token","content":"头痛"}` | LLM 逐 token 输出 |
+| `done` | `{"type":"done"}` | 生成完成信号 |
+
+> 注意：流式路径**不产生 `review` 事件**，不经过人工审核。
+> 记忆在 LLM 生成完毕后自动持久化到 Redis，无需前端额外确认。
+
+### 同步路径 (`run`) — 完整 LangGraph StateGraph + 工具调用 + 人机协同
 
 ```
 classify_intent (日志/UI)
@@ -82,21 +122,27 @@ classify_intent (日志/UI)
 ```
 
 **路径选择**:
-- **流式路径** (`run_stream`): 条件分支 + `ChatOllama.stream()`，生成后 yield review 事件
-- **同步路径** (`run`): 完整 LangGraph 图 + `ChatOllama.invoke()` + 工具调用 + 人机协同
+- **流式路径** (`run_stream`): 不走 LangGraph 图，直接条件分支 + `ChatOllama.stream()`，用于 SSE 流式场景
+- **同步路径** (`run`): 走完整 LangGraph 图，支持工具调用 + `human_review` 人机协同中断，用于同步 API 或 CLI 非流式场景
+
+**`human_review` 自动批准**: 同步图中 LLM 无工具调用时会在 `human_review` 节点暂停，
+`run()` 方法检测到中断后自动调用 `graph.invoke(None)` 恢复执行（自动批准），
+无需外部人工确认。
 
 **分层记忆**: 所有分支使用 `MemorySummarizer.get_enhanced_history()` 替代裸 `get_history_text()`，
 在最近 10 轮对话基础上附加语义检索到的历史摘要，实现长期记忆。
 
 ---
 
-## 意图分类（双引擎）
+## 意图分类（三引擎）
 
 | 引擎 | 延迟 | 依赖 | 说明 |
 |------|------|------|------|
 | BERT (默认) | ~50ms | `sentence-transformers` | 多头匹配，精度 ~85-90% |
 | LLM (回退) | ~2s | Ollama | JSON Prompt，精度 ~95% |
 | 关键词 (兜底) | <1ms | 无 | 权重打分，保底分类 |
+
+---
 
 ## 关键参数
 

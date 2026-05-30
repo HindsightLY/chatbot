@@ -174,19 +174,37 @@ def check_and_summarize(session_id):
 
 ### 现状
 
-```python
-StateGraph → classify_intent → call_model(bind_tools) → conditional
-  ├─ 有工具调用 → tool_node → call_model (循环)
-  └─ 无工具调用 → human_review → save_memory → END
+Agent 提供两种推理路径:
+
+**流式路径 (`run_stream`)** — 不走 LangGraph 图，直接条件分支 + `ChatOllama.stream()`：
+```
+意图分类 → 按意图路由（medical_inquiry / chat_general / system_query）
+  → 各分支均使用 enhanced_history（分层记忆）
+  → LLM.stream() → 逐 token 产出
+  → 自动保存记忆到 Redis → 结束
 ```
 
-已实现工具调用标准化 + 人机协同。
+**同步路径 (`run`)** — 完整 LangGraph StateGraph：
+```
+StateGraph → classify_intent → call_model(bind_tools) → _routes_after_model
+  ├─ 有 tool_calls → tool_node → call_model (循环)
+  └─ 无 tool_calls → human_review (interrupt_after) → save_memory → END
+```
+
+关键区别：
+| 维度 | 流式路径 | 同步路径 |
+|------|---------|---------|
+| 图执行 | 不走图，直接条件分支 | 走完整 LangGraph StateGraph |
+| 工具调用 | 不支持（由外部路由处理） | 支持 bind_tools + ToolNode |
+| 人机协同 | 无（自动保存记忆） | human_review 节点 + interrupt_after |
+| 输出 | 逐 token yield | 返回完整回答字符串 |
+| 使用场景 | SSE 流式 API | 同步 API / 内部调用 |
 
 ### 行业对比
 
 | 功能 | 当前 | LangGraph 完整能力 | AutoGen / CrewAI |
 |------|------|-------------------|------------------|
-| Human-in-the-Loop | ✅ `interrupt_after` | `interrupt_after` ✅ | ✅ |
+| Human-in-the-Loop | ✅ `interrupt_after`（同步图） | `interrupt_after` ✅ | ✅ |
 | 并行节点 | ❌ | `add_node` + fan-out ✅ | ✅ 多 agent |
 | 循环/重试 | ✅ `call_model → tool_node → call_model` | `add_conditional_edges` 自环 ✅ | ✅ |
 | Tool Calling | ✅ `bind_tools()` + ToolNode + @tool | `bind_tools()` + ToolNode ✅ | ✅ 原生 |
@@ -223,7 +241,7 @@ llm_with_tools = ChatOllama(...).bind_tools(tools)
 tool_node = ToolNode(tools)
 ```
 
-**✅ P1 — 人机协同 (Human-in-the-Loop)**
+**✅ P1 — 人机协同 (Human-in-the-Loop，仅同步图路径)**
 
 ```python
 # agent.py — 图构建
@@ -236,11 +254,10 @@ graph = builder.compile(checkpointer=MemorySaver(), interrupt_after=["human_revi
 
 **实现细节**:
 - `human_review` 节点通过 `interrupt_after` 暂停图执行，等待外部 `resume` 或 `update_state`
+- `run()` 方法中检测到中断后默认自动批准（调用 `graph.invoke(None)` 恢复）
 - CLI 模式中，用户可输入 Y/n 确认或拒绝回答
-- SSE 流式路径中，生成回答后 yield `{"type": "review", "content": answer}` 事件
-- 新增 `POST /api/chat/review` 端点记录审核结果
-- 审核结果可扩展：approved / rejected + feedback
-- 未来可对接前端审核 UI（点赞/踩/修改建议）
+- 流式路径 (`run_stream`) **不经过 human_review**，生成完毕后自动保存记忆到 Redis
+- `POST /api/chat/review` 端点已移除（SSE 流式不再产生 `review` 事件）
 
 ---
 
@@ -278,7 +295,7 @@ from sentence_transformers import SentenceTransformer
 
 model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
 query_emb = model.encode(query, normalize_embeddings=True)
-# 与每个意图的示例句向量计算余弦相似度
+# 与每个意图的预编码示例句向量计算余弦相似度
 # 取最相似意图作为分类结果
 ```
 
@@ -290,7 +307,7 @@ query_emb = model.encode(query, normalize_embeddings=True)
 | 离线可用 | ❌ | ✅ |
 | 可扩展 | 修改 prompt 即可 | 增删示例句即可 |
 
-**双引擎回退链**: BERT → LLM → 关键词规则，保证任意环境下均有分类结果。
+**三引擎回退链**: BERT → LLM → 关键词规则，保证任意环境下均有分类结果。
 
 **下一步 — 模型路由 (Model Router)**
 
@@ -488,7 +505,7 @@ for case in test_cases:
 | **P0** | ✅ 语义分块 (Semantic Chunking) | ✅ 已完成 | 话题凝聚力提升 |
 | **P1** | ✅ Cross-Encoder 重排序 | ✅ 已完成 | 准确率 +5-15% |
 | **P1** | ✅ 工具调用标准化 (bind_tools + @tool) | ✅ 已完成 | Agent 灵活性 |
-| **P1** | ✅ 人机协同 (interrupt_after + review) | ✅ 已完成 | 安全性 / 可控性 |
+| **P1** | ✅ 人机协同 (interrupt_after，同步图) | ✅ 已完成 | 安全性 / 可控性 |
 | **P0** | ✅ Docker 容器化 (Compose 三服务) | ✅ 已完成 | 部署标准化 |
 | **P1** | ✅ BERT 分类器 (sentence-transformers) | ✅ 已完成 | 延迟 2s→50ms |
 | **P1** | ✅ HyDE 查询转换 | ✅ 已完成 | 召回复盖率提升 |

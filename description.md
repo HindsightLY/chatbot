@@ -3,8 +3,8 @@
 ## 整体架构
 
 ```
-                         ┌─────────────────────────────────┐
-                         │   用户接口层 (Presentation)      │
+                          ┌─────────────────────────────────┐
+                          │   用户接口层 (Presentation)      │
   ┌──────────────────┐   │  ┌──────────┐  ┌─────────────┐  │
   │ 浏览器 (index.html) │──┼─→│ FastAPI  │  │ CLI (input) │  │
   │  SSE 流式渲染      │   │  │ Router   │  │ 逐行交互    │  │
@@ -12,35 +12,36 @@
                          └───────┼────────────────┼─────────┘
                                  │                │
                                  ▼                ▼
-                         ┌──────────────────────────┐
-                         │   意图路由层               │
-                         │  IntentClassifier         │
-                         │   (LLM → JSON 分类)       │
-                         └────────────┬─────────────┘
-                                      │
-                    ┌─────────────────┼──────────────────┐
-                    ▼                 ▼                  ▼
-            medical_inquiry    chat_general        system_query
-                    │                 │                  │
-                    ▼                 ▼                  ▼
-          ┌─────────────────┐ ┌──────────────┐  ┌──────────────┐
-          │ MedicalAgent    │ │ ToolManager  │  │ ToolManager  │
-          │ (LangGraph)     │ │ 天气/闲聊    │  │ 通用 LLM     │
-          │                 │ │              │  │              │
-          │  classify_intent│ │ 城市提取     │  │ LLM 直接回答 │
-          │  → retrieve_docs│ │  → 高德 API  │  │              │
-          │  → generate     │ │  → LLM 润色  │  │              │
-          │  → save_memory  │ │              │  │              │
-          └────────┬────────┘ └──────────────┘  └──────────────┘
-                   │
-                   ▼
-          ┌─────────────────────┐
-          │   持久化层           │
-          │  ┌──────┐ ┌──────┐  │
-          │  │Redis │ │Chroma│  │
-          │  │记忆  │ │向量  │  │
-          │  └──────┘ └──────┘  │
-          └─────────────────────┘
+                          ┌──────────────────────────┐
+                          │   意图路由层               │
+                          │  IntentClassifier         │
+                          │   (BERT / LLM / 关键词)   │
+                          └────────────┬─────────────┘
+                                       │
+                     ┌─────────────────┼──────────────────┐
+                     ▼                 ▼                  ▼
+             medical_inquiry    chat_general        system_query
+                     │                 │                  │
+                     ▼                 ▼                  ▼
+           ┌─────────────────┐ ┌──────────────┐  ┌──────────────┐
+           │ MedicalAgent    │ │ ToolManager  │  │ ToolManager  │
+           │ (LangGraph)     │ │ 天气/闲聊    │  │ 通用 LLM     │
+           │                 │ │              │  │              │
+           │  run_stream():  │ │ 城市提取     │  │ LLM 直接回答 │
+           │  意图→检索→生成│ │  → 高德 API  │  │              │
+           │  → 自动存记忆   │ │  → LLM 润色  │  │              │
+           │  run():         │ │              │  │              │
+           │  StateGraph 图  │ └──────────────┘  └──────────────┘
+           └────────┬────────┘
+                    │
+                    ▼
+           ┌─────────────────────┐
+           │   持久化层           │
+           │  ┌──────┐ ┌──────┐  │
+           │  │Redis │ │Chroma│  │
+           │  │记忆  │ │向量  │  │
+           │  └──────┘ └──────┘  │
+           └─────────────────────┘
 ```
 
 ## 模块详解
@@ -186,15 +187,6 @@ VectorStoreManager
 `cross-encoder/ms-marco-MiniLM-L-6-v2` 模型。模型首次使用时自动下载。
 若 `sentence-transformers` 未安装，跳过重排序步骤（不影响主流程）。
 
-**为什么选 ChromaDB 而非 FAISS**:
-| 维度 | FAISS (旧) | ChromaDB (新) |
-|------|-----------|--------------|
-| 持久化 | 手动 pickle | 自动持久化目录 |
-| 集合管理 | 单文件 | 多集合隔离 |
-| 元数据过滤 | 需自行实现 | 内建支持 |
-| 混合检索 | ❌ 需自行实现 BM25 | ✅ 可集成 rank-bm25 |
-| 生产部署 | 单机内存 | 可选 HTTP 模式 |
-
 ---
 
 ### 4. 对话记忆 — `src/service/memory_store.py` + `memory_summarizer.py`
@@ -221,12 +213,6 @@ TTL:   86400s (每次 rpush 时刷新)
 
 **故障回退**: Redis 不可用时 `_connect()` 将 `_client` 置为 `None`，
 所有读写方法静默返回空结果。主流程不受影响。
-
-**为什么用 Redis List 而非 FAISS**:
-- 对话记忆不需要语义检索（不需要按内容搜索历史）
-- List 结构天然按时序追加，正好对应对话流
-- TTL 自动过期，无需手动清理
-- 相比原 HybridChatMemory（FAISS+内存），外部化存储支持多进程共享
 
 #### 历史摘要 (MemorySummarizer)
 
@@ -264,12 +250,12 @@ self.memory_summarizer.check_and_summarize(session_id)
 
 **职责**: LangGraph StateGraph 驱动的多节点 Agent，封装 RAG + 工具调用 + 人机协同全流程。
 
-**节点定义**:
+**同步图路径 (`run`)** — 完整图拓扑，含工具调用 + 人机协同：
 
 ```
 classify_intent (仅日志/UI展示)
   → _classify_intent(state):
-      messages[-1] → IntentClassifier → intent (并存 state 供前端)
+      messages[-1] → IntentClassifier → intent (存 state 供前端)
 
 call_model (bind_tools — LLM 自主决策)
   → _call_model(state):
@@ -278,23 +264,21 @@ call_model (bind_tools — LLM 自主决策)
         ├─ 医疗问题 → 调用 search_medical_knowledge
         ├─ 天气问题 → 调用 get_weather
         └─ 其他     → 直接回答 (chat_general)
+      prompt 中包含 enhanced_history（含摘要检索）
 
-conditional edge (should_continue)
-  ├── 有 tool_calls → tool_node
-  │     → ToolNode 执行工具 → 结果回填到 messages
-  │     → 返回 call_model (循环，LLM 用工具结果生成最终答案)
-  │
-  └── 无 tool_calls → human_review (interrupt_after)
-        → 暂停等待外部确认或自动批准
+_routes_after_model (条件边)
+  ├── 有 tool_calls → "continue" → tool_node → call_model (循环)
+  └── 无 tool_calls → "end" → human_review (interrupt_after)
 
-human_review (人机协同)
+human_review (人机协同，仅同步图路径)
   → _human_review(state):
       interrupt_after 暂停，等待 resume() 或 update_state()
-      外部可通过 POST /api/chat/review 或 CLI 输入确认
+      CLI 中用户可输入 Y/n 确认
 
 save_memory (记忆持久化)
   → _save_memory(state):
       user_input + answer → MemoryStore.add_message()
+      → check_and_summarize()（分层记忆）
 ```
 
 **状态定义 (AgentState TypedDict)**:
@@ -306,37 +290,38 @@ save_memory (记忆持久化)
     "context_docs": List[str],   # ChromaDB 检索到的文档正文
     "answer": str,               # LLM 最终回答
     "human_approved": bool,      # 审核结果
-    "review_skipped": bool       # 是否跳过审核
+    "review_skipped": bool,      # 是否跳过审核
+    "tool_used": bool,           # 本轮是否调用了工具
 }
 ```
 
-**工具定义** (`src/tools/medical_tools.py`):
+**同步图编译参数**:
+```python
+graph = builder.compile(
+    checkpointer=MemorySaver(),
+    interrupt_after=["human_review"]  # 在 human_review 节点后暂停
+)
+```
 
-使用 `@tool` 装饰器定义标准 LangChain 工具：
+**`run()` 自动批准机制**:
+```python
+# 首次调用: 执行到 human_review 节点中断
+final_state = self.graph.invoke(initial_state, config=thread_config)
 
-| 工具 | 函数 | 触发条件 |
-|------|------|---------|
-| `search_medical_knowledge(query)` | HyDE 转换 → ChromaDB 混合检索 | 医疗相关问题 |
-| `get_weather(location)` | 高德天气 API | 天气查询 |
-| `chat_general(query)` | ChatOllama 直接回答 | 闲聊/系统查询 |
+# 如果在 human_review 被中断，自动批准恢复执行
+if self.graph.get_state(thread_config).next:
+    final_state = self.graph.invoke(None, config=thread_config)
+```
 
-**Prompt 模板**:
+---
 
-| 模板 | 用途 | 输入 |
-|------|------|------|
-| `self.prompt` | RAG 医疗问答 | `{history}` + `{context}` + `{input}` |
-| `self.general_prompt` | 闲聊 / 天气润色 | `{history}` + `{input}` |
-
-两套模板均包含 `{history}`（来自 Redis 的最近 10 轮对话），
-确保多轮记忆中提到的信息（姓名、既往症状等）可在后续轮次引用。
-
-**流式推理 (run_stream)** — 沿用条件分支 + `ChatOllama.stream()`，增加审核事件：
+**流式路径 (`run_stream`)** — 不经过 LangGraph 图，直接走条件分支 + `ChatOllama.stream()`：
 
 ```
 意图分类
   │
   ├── medical_inquiry / unknown
-  │     → HyDE 查询转换（LLM 生成假设文档）
+  │     → (可选) HyDE 查询转换（LLM 生成假设文档）
   │     → ChromaDB 混合检索（使用 HyDE 文档嵌入）
   │     → self.prompt + enhanced_history + context
   │     → ChatOllama.stream(formatted_prompt)
@@ -349,53 +334,17 @@ save_memory (记忆持久化)
   │     → self.general_prompt + enhanced_history + input
   │     → ChatOllama.stream()
   │
-  ├── review event
-  │     → yield {"type": "review", "content": full_answer}
-  │     → CLI: 等待用户 Y/n 确认
-  │     → SSE: 前端可调用 /api/chat/review 记录审核结果
-  │
-  └── save_memory → add_message(user + assistant)
-      → check_and_summarize()（≥20 轮时触发摘要）
+  └── 其他（兜底）
+        → self.prompt + "未找到相关医学资料" + enhanced_history
+        → ChatOllama.stream()
+
+  ↓ 所有分支结束后自动执行
+  自动保存记忆 → add_message(user + assistant)
+    → check_and_summarize()（≥20 轮时触发摘要）
+  → yield {"type": "done"}
 ```
 
-> `enhanced_history` = 近期对话 + 语义检索到的相关历史摘要 (MemorySummarizer)
-> `HyDE` 仅在 medical_inquiry 分支的稠密检索阶段生效，BM25 仍使用原始查询
-
-**LangGraph 图执行 (run)** — 完整图拓扑，含工具调用 + 人机协同：
-
-```
-classify_intent → call_model → conditional
-  ├─ tool_calls → tool_node → call_model (循环)
-  │     └─ search_medical_knowledge 内部应用 HyDE 转换
-  └─ 无工具调用 → human_review (interrupt_after) → save_memory → END
-      └─ call_model 中使用 enhanced_history（含摘要检索）
-      └─ save_memory 后触发 check_and_summarize（分层记忆）
-```
-
-**编译参数**:
-```python
-graph = builder.compile(
-    checkpointer=MemorySaver(),
-    interrupt_after=["human_review"]  # 在 human_review 节点后暂停
-)
-```
-
----
-
-### 6. 聊天机器人 — `src/service/chatbot.py`
-
-`MedicalAgent` 的薄包装，保持外部接口稳定：
-
-```python
-class MedicalChatbot:
-    def get_answer(self, question, session_id) -> dict:
-        return {"answer": self.agent.run(question, session_id)}
-
-    def ask_stream(self, question, session_id) -> Generator[dict]:
-        yield from self.agent.run_stream(question, session_id)
-```
-
-**Yields**（流式接口）:
+**流式产出事件**（仅三个类型）:
 ```python
 {"type": "intent", "content": "medical_inquiry"}  # 意图事件（首个）
 {"type": "token",  "content": "根"}               # LLM 输出片段
@@ -403,11 +352,50 @@ class MedicalChatbot:
 {"type": "done"}                                   # 结束信号
 ```
 
+> 流式路径**不产生 `review` 事件**，记忆在 LLM 生成完毕后自动持久化到 Redis。
+
+#### Prompt 模板
+
+| 模板 | 用途 | 输入 |
+|------|------|------|
+| `self.prompt` | RAG 医疗问答 | `{history}` + `{context}` + `{input}` |
+| `self.general_prompt` | 闲聊/天气润色 | `{history}` + `{input}` |
+
+两套模板均包含 `{history}`（来自 Redis 的最近 10 轮对话），
+确保多轮记忆中提到的信息（姓名、既往症状等）可在后续轮次引用。
+
+#### 工具定义 (`src/tools/medical_tools.py`)
+
+使用 `@tool` 装饰器定义标准 LangChain 工具：
+
+| 工具 | 函数 | 触发条件 |
+|------|------|---------|
+| `search_medical_knowledge(query)` | HyDE 转换 → ChromaDB 混合检索 | 医疗相关问题 |
+| `get_weather(location)` | 高德天气 API | 天气查询 |
+| `chat_general(query)` | ChatOllama 直接回答 | 闲聊/系统查询 |
+
+---
+
+### 6. 聊天机器人 — `src/service/chatbot.py`
+
+`MedicalAgent` 的薄包装工厂函数，保持外部接口稳定：
+
+```python
+def get_chatbot_agent():
+    """获取 MedicalAgent 实例（直接返回 system_initializer.agent）"""
+    return system_initializer.agent
+```
+
+**设计说明**:
+- 不再使用 `MedicalChatbot` 包装类（已移除）
+- CLI 和 API 路由层直接使用 `system_initializer.agent`
+- `get_chatbot_agent()` 作为向后兼容的导入入口保留
+
 ---
 
 ### 7. 意图分类 — `src/service/intent_classifier.py` + `bert_classifier.py`
 
-**双引擎分类器**: BERT 优先（~50ms），LLM 兜底（~2s），关键词规则保底。
+**三引擎分类器**: BERT 优先（~50ms），LLM 兜底（~2s），关键词规则保底。
 
 #### 引擎 1: BERT 分类器 (默认，推荐)
 
@@ -499,6 +487,7 @@ general_prompt_template.format(query, additional_context)
 | `/api/chat` | POST | 普通问答 | JSON `{intent, answer}` |
 | `/api/chat/stream` | POST | SSE 流式问答 | `text/event-stream` |
 | `/api/chat/daily_news` | POST | 新闻查询 | JSON `{success, news[], total}` |
+| `/api/chat/health` | GET | 健康检查 | JSON `{status, components, errors}` |
 
 **SSE 协议**:
 ```
@@ -513,7 +502,27 @@ data: [DONE]                             ← 终止信号
 - 使用 `StreamingResponse(media_type="text/event-stream")`
 - `asyncio.get_event_loop().run_in_executor(None, partial(next, gen))`
   将同步 Generator 转换为异步迭代，避免阻塞事件循环
-- 每轮生成后自动写入 Redis（在 `agent.py` 的 `save_memory` 或 `run_stream` 末尾）
+- 所有分支在 `run_stream` 末尾自动写入 Redis，无需前端额外确认
+
+**健康检查** (`GET /api/chat/health`):
+```python
+{
+    "status": "ok" | "initializing",
+    "components": {
+        "vector_store": bool,
+        "memory_store": bool,
+        "intent_classifier": bool,
+        "tool_manager": bool,
+        "agent": bool,
+    },
+    "errors": [str]
+}
+```
+
+**设计说明**:
+- 不再使用 `system_initializer.chatbot`（MedicalChatbot 已移除）
+- 路由层直接使用 `system_initializer.agent`
+- 人工审核 review 端点已移除（SSE 流式路径不再产生 review 事件）
 
 ---
 
@@ -527,6 +536,7 @@ system_initializer.initialize_system()
 ```
 
 与 API 模式共享 `SystemInitializer` 单例和完整的意图路由逻辑。
+CLI 也直接使用 `system_initializer.agent.run_stream()`，不经过 LangGraph 图。
 
 ---
 
@@ -540,7 +550,6 @@ system_initializer.initialize_system()
 3. IntentClassifier       ── 仅依赖 Ollama 服务
 4. ToolManager            ── 无依赖
 5. MedicalAgent           ── 依赖 1/2/3/4
-6. MedicalChatbot         ── 依赖 5
 ```
 
 **触发方式**:
@@ -579,32 +588,31 @@ system_initializer.initialize_system()
                     │  SystemInitializer│
                     └──────┬───────┘
                            ▼
-              ┌────────────────────────┐
-              │  离线索引阶段           │
-              │  (首次或 data/disease   │
-              │   有更新时)             │
-              │                        │
-              │  DocumentLoader        │
-              │  → RecursiveCharacter  │
-              │    TextSplitter        │
-              │  → Chroma.from_docs()  │
-              │  → persist to disk     │
-              └────────────────────────┘
+               ┌────────────────────────┐
+               │  离线索引阶段           │
+               │  (首次或 data/disease   │
+               │  有更新时)             │
+               │                        │
+               │  DocumentLoader        │
+               │  → SemanticChunk       │
+               │  → Chroma.from_docs()  │
+               │  → persist to disk     │
+               └────────────────────────┘
                            │
-              ┌────────────┴────────────┐
-              │                         │
-              ▼                         ▼
-   ┌──────────────────┐     ┌────────────────────┐
-   │  在线推理阶段     │     │  Redis 存储        │
-   │                  │     │  用户 → 助手对话    │
-   │  User Input      │     │  TTL 24h           │
-   │  → Classify      │     └────────────────────┘
-   │  → Route         │
-   │  → Retrieve(Chro)│
-   │  → Generate(LLM) │
-   │  → Save Memory   │
-   │  → Response      │
-   └──────────────────┘
+               ┌────────────┴────────────┐
+               │                         │
+               ▼                         ▼
+    ┌──────────────────┐     ┌────────────────────┐
+    │  在线推理阶段     │     │  Redis 存储        │
+    │                  │     │  用户 → 助手对话    │
+    │  User Input      │     │  TTL 24h           │
+    │  → Classify      │     └────────────────────┘
+    │  → Route         │
+    │  → Retrieve(Chro)│
+    │  → Generate(LLM) │
+    │  → Save Memory   │
+    │  → Response      │
+    └──────────────────┘
 ```
 
 ## Docker 部署

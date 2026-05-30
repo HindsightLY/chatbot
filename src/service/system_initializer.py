@@ -1,19 +1,19 @@
 """
-系统初始化服务
-负责按依赖顺序组装系统核心组件
+系统初始化服务 — 按依赖顺序组装系统核心组件
 
-初始化顺序（有严格依赖关系）:
+关键设计:
+  - 每个组件独立 try/except，单组件失败不影响其他组件
+  - Ollama/Redis 缺失时记录警告而非崩溃
+  - 调用方通过检查属性是否为 None 判断组件状态
+
+初始化顺序（严格的依赖关系）:
   1. VectorStoreManager   — ChromaDB 向量库（无依赖）
   2. MemoryStore          — Redis 对话记忆（无依赖）
-  3. IntentClassifier     — 意图分类器（无依赖，仅需 LLM）
+  3. IntentClassifier     — 意图分类器（依赖 Ollama）
   4. ToolManager          — 工具管理器（无依赖）
   5. MedicalAgent         — LangGraph Agent（依赖 1/2/3/4）
-  6. MedicalChatbot       — 聊天机器人（依赖 5）
 
-错误恢复策略:
-  - 每个组件独立 try/except，单组件失败不影响其他组件
-  - 缺失 Ollama/Redis 时记录警告而非崩溃
-  - 调用方通过检查属性是否为 None 判断组件状态
+医疗聊天机器人 MedicalChatbot 已被移除，路由层直接使用 MedicalAgent。
 """
 from typing import Tuple
 from src.utils.logger_config import logger
@@ -24,34 +24,33 @@ from src.service.memory_store import MemoryStore
 from src.service.intent_classifier import IntentClassifier
 from src.service.tool_manager import ToolManager
 from src.service.agent import MedicalAgent
-from src.service.chatbot import MedicalChatbot
 
 
 class SystemInitializer:
     """
-    系统初始化器，管理所有核心组件的生命周期
+    系统初始化器
 
-    chat_router.py 和 cli_router.py 通过访问本类的属性来获取组件实例。
-    组件的实际初始化由 initialize_system() 延迟触发。
-    各组件独立容错，单组件失败不影响系统启动。
+    管理所有核心组件的生命周期。组件由 initialize_system() 延迟触发初始化。
+    chat_router.py 和 cli_router.py 通过访问本类的属性获取组件实例（如 system_initializer.agent）。
     """
 
     def __init__(self):
-        self.vector_store = None
-        self.memory_store = None
-        self.intent_classifier = None
-        self.tool_manager = None
-        self.agent = None
-        self.chatbot = None
-        self.initialized = False
-        self.init_errors = []
+        self.vector_store = None      # VectorStoreManager 实例
+        self.memory_store = None      # MemoryStore 实例（Redis）
+        self.intent_classifier = None # IntentClassifier 实例
+        self.tool_manager = None      # ToolManager 实例
+        self.agent = None             # MedicalAgent 实例（核心组件）
+        self.initialized = False      # 是否完成初始化
+        self.init_errors = []         # 初始化过程中的错误列表
 
     def initialize_system(self) -> Tuple[object, object, object]:
         """
-        按依赖顺序初始化所有组件，单组件失败不影响其他组件
+        按依赖顺序初始化所有组件
+
+        每个组件初始化独立 try/except，单组件失败不影响其他组件。
 
         Returns:
-            (vector_store, intent_classifier, chatbot)
+            (vector_store, intent_classifier, agent) — 三个核心组件引用
         """
         logger.info("🔄 开始初始化医疗AI系统...")
         logger.info(f"📁 项目根目录: {APP_CONFIG.project_root}")
@@ -61,6 +60,7 @@ class SystemInitializer:
 
         self.init_errors = []
 
+        # ── 检查 Ollama 服务是否可用（不阻塞后续初始化） ──
         import urllib.request
         import urllib.error
         ollama_url = APP_CONFIG.llm_base_url.rstrip("/") + "/api/tags"
@@ -72,6 +72,7 @@ class SystemInitializer:
             logger.warning("⚠️ 请确保已启动 Ollama: ollama serve")
             self.init_errors.append(f"Ollama 未运行 ({APP_CONFIG.llm_base_url})")
 
+        # ── 按依赖顺序初始化各组件 ──
         if self.vector_store is None:
             self.vector_store = self._initialize_vector_store()
         if self.memory_store is None:
@@ -82,8 +83,6 @@ class SystemInitializer:
             self.tool_manager = self._initialize_tool_manager()
         if self.agent is None:
             self.agent = self._initialize_agent()
-        if self.chatbot is None:
-            self.chatbot = self._initialize_chatbot()
 
         if self.init_errors:
             logger.warning(f"⚠️ 系统初始化完成，但存在 {len(self.init_errors)} 个错误:")
@@ -93,13 +92,15 @@ class SystemInitializer:
             logger.info("✅ 系统初始化完成！")
 
         self.initialized = True
-        return self.vector_store, self.intent_classifier, self.chatbot
+        return self.vector_store, self.intent_classifier, self.agent
 
     def _initialize_vector_store(self):
         """
-        初始化 ChromaDB 向量存储:
-          存在缓存且非空 → 直接加载
-          不存在/为空     → 从文档目录加载文件 → 分块 → 创建 Chroma 集合
+        初始化 ChromaDB 向量存储
+
+        策略:
+          - 存在缓存且非空 → 直接加载（懒加载，首次搜索时建立 BM25 索引）
+          - 不存在或为空   → 从 data/disease/ 加载文档 → 分块 → 创建 Chroma 集合 + BM25 索引
         """
         logger.info("📦 初始化 ChromaDB 向量存储...")
         try:
@@ -138,7 +139,13 @@ class SystemInitializer:
             return None
 
     def _initialize_memory_store(self):
-        """初始化 Redis 对话记忆存储（容错：Redis 不可用时返回 None）"""
+        """
+        初始化 Redis 对话记忆存储
+
+        容错:
+          - Redis 连接失败时记录警告，返回一个无连接的 MemoryStore 实例
+          - 后续所有读写操作静默返回空结果，不影响主流程
+        """
         logger.info("💾 初始化 Redis 对话记忆...")
         try:
             store = MemoryStore()
@@ -151,11 +158,16 @@ class SystemInitializer:
             err_msg = f"Redis 记忆存储初始化失败: {e}"
             logger.warning(f"⚠️ {err_msg}，对话记忆将降级")
             self.init_errors.append(err_msg)
+            # 返回一个无连接的 MemoryStore 实例，避免调用方做 None 检查
             return MemoryStore.__new__(MemoryStore)
 
     def _initialize_intent_classifier(self):
         """
-        初始化意图分类器（容错：LLM 不可用时记录警告）
+        初始化意图分类器
+
+        内部使用双引擎:
+          1. BERT 分类器（sentence-transformers，~50ms，可离线）
+          2. LLM 分类器（OllamaLLM，~2s，依赖 Ollama）
         """
         logger.info("🎯 初始化意图分类器...")
         try:
@@ -169,7 +181,7 @@ class SystemInitializer:
             return None
 
     def _initialize_tool_manager(self):
-        """初始化工具管理器（容错：LLM 不可用时记录警告）"""
+        """初始化工具管理器（天气查询 + 通用闲聊）"""
         logger.info("🛠️ 初始化工具管理器...")
         try:
             tm = ToolManager()
@@ -186,7 +198,9 @@ class SystemInitializer:
         初始化 LangGraph Agent
 
         依赖 vector_store / memory_store / intent_classifier / tool_manager 已就绪。
-        必要组件缺失时返回 None。
+        intent_classifier 不可用时跳过初始化（无法做意图路由）。
+
+        MedicalChatbot 包装层已被移除，路由层直接使用 agent。
         """
         if self.intent_classifier is None:
             logger.warning("⚠️ 意图分类器未就绪，跳过 Agent 初始化")
@@ -208,22 +222,7 @@ class SystemInitializer:
             self.init_errors.append(err_msg)
             return None
 
-    def _initialize_chatbot(self):
-        """初始化聊天机器人（依赖 agent 已就绪）"""
-        if self.agent is None:
-            logger.warning("⚠️ Agent 未就绪，跳过 Chatbot 初始化")
-            return None
-        logger.info("💬 初始化聊天机器人...")
-        try:
-            chatbot = MedicalChatbot(agent=self.agent)
-            logger.info("✅ 聊天机器人初始化完成！")
-            return chatbot
-        except Exception as e:
-            err_msg = f"Chatbot 初始化失败: {e}"
-            logger.error(f"❌ {err_msg}")
-            self.init_errors.append(err_msg)
-            return None
-
 
 # 全局单例，由 main.py 的 startup 事件或 cli_router 触发初始化
+# chat_router.py / cli_router.py 通过 from ... import system_initializer 访问
 system_initializer = SystemInitializer()

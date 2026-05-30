@@ -1,14 +1,15 @@
 """
-向量存储管理模块
-负责 ChromaDB 向量库的创建、加载、持久化和检索
+向量存储管理模块 — ChromaDB 创建、加载、混合检索、重排序
 
 检索流水线（由 APP_CONFIG 控制各阶段开关）:
   1. 混合检索 (Hybrid Search)
-     ├─ 稠密检索: ChromaDB 余弦相似度 (Top-N)
-     └─ 稀疏检索: BM25 关键词匹配 (Top-N)
-     └─ RRF 融合: Reciprocal Rank Fusion 合并排序
+     ├─ 稠密检索: ChromaDB 余弦相似度 (Top-N, N = hybrid_prefetch_k)
+     └─ 稀疏检索: BM25 关键词匹配 (jieba 分词 + BM25Okapi, Top-N)
+     └─ RRF 融合: Reciprocal Rank Fusion 合并排序（分别计算稠密和稀疏的贡献）
   2. Cross-Encoder 重排序 (可选)
-     └─ BGE-Reranker / MiniLM 对 (query, doc) 对逐一打分
+     └─ cross-encoder/ms-marco-MiniLM-L-6-v2 对 (query, doc) 对逐一打分
+
+被 system_initializer.py 调用，结果通过 system_initializer.vector_store 暴露给 agent.py。
 """
 import os
 import jieba
@@ -27,12 +28,15 @@ class VectorStoreManager:
     向量存储管理器
 
     职责:
-      - 创建/加载 ChromaDB 集合
-      - 将文档向量化并持久化到磁盘
-      - 提供混合检索 (稠密+稀疏+RRF)
-      - 提供 Cross-Encoder 重排序
+      - 创建/加载 ChromaDB 集合（懒加载，磁盘持久化）
+      - 构建 BM25 倒排索引（用于稀疏检索）
+      - 提供混合检索（稠密 + 稀疏 + RRF 融合 + 可选重排序）
+      - 提供纯稠密检索接口（兼容旧接口）
 
-    被 system_initializer.py 调用，结果注入 MedicalChatbot。
+    RRF 计算说明:
+      每个文档的最终得分 = Σ 1/(rrf_k + rank)
+      稠密和稀疏分别在 rank 位置上给分。
+      对于只在 BM25 中命中的文档，稠密 rank 为 None，不贡献稠密分数。
     """
 
     def __init__(self, persist_dir: str = None):
@@ -42,15 +46,18 @@ class VectorStoreManager:
         os.makedirs(self.persist_dir, exist_ok=True)
         logger.info(f"📁 ChromaDB 存储目录: {self.persist_dir}")
 
-        self._vector_store = None
-        self._bm25_index = None
-        self._bm25_docs: List[Tuple[str, str, dict]] = []
-        self._reranker = None
+        self._vector_store = None                    # Chroma 实例（懒加载）
+        self._bm25_index = None                      # BM25Okapi 实例
+        self._bm25_docs: List[Tuple[str, str, dict]] = []  # BM25 文档列表: [(doc_id, text, metadata)]
+        self._reranker = None                        # Cross-Encoder 模型实例
 
-    # ────────── ChromaDB 懒加载 ──────────
+    # ══════════════════════════════════════════
+    #  ChromaDB 懒加载
+    # ══════════════════════════════════════════
 
     @property
     def vector_store(self):
+        """懒加载 ChromaDB：首次访问时从磁盘加载"""
         if self._vector_store is None:
             self._vector_store = self.load_vector_store()
         return self._vector_store
@@ -61,9 +68,17 @@ class VectorStoreManager:
             base_url=APP_CONFIG.llm_base_url
         )
 
-    # ────────── ChromaDB 加载/创建 ──────────
+    # ══════════════════════════════════════════
+    #  ChromaDB 加载/创建
+    # ══════════════════════════════════════════
 
     def load_vector_store(self) -> Optional[Chroma]:
+        """
+        从磁盘加载已持久化的 ChromaDB 集合
+
+        若 persist_dir 存在且非空，尝试加载已有 ChromaDB；
+        加载成功后自动确保 BM25 索引已构建。
+        """
         try:
             if os.path.exists(self.persist_dir) and os.listdir(self.persist_dir):
                 logger.info(f"🔄 尝试加载 ChromaDB 从: {self.persist_dir}")
@@ -85,6 +100,15 @@ class VectorStoreManager:
             return None
 
     def create_vector_store(self, documents: List[Document]) -> Chroma:
+        """
+        创建新的 ChromaDB 集合并持久化到磁盘
+
+        Args:
+            documents: Document 列表（已分块）
+
+        Returns:
+            Chroma 实例（同时构建了 BM25 索引）
+        """
         if not documents:
             raise ValueError("文档列表为空，无法创建向量库")
 
@@ -110,11 +134,16 @@ class VectorStoreManager:
             logger.exception(f"❌ 创建 ChromaDB 失败")
             raise
 
-    # ────────── BM25 索引 ──────────
+    # ══════════════════════════════════════════
+    #  BM25 索引
+    # ══════════════════════════════════════════
 
     def _build_bm25_index(self, documents: List[Document] = None):
         """
         构建 BM25 倒排索引
+
+        使用 jieba 中文分词对每个文档做 tokenization，
+        然后创建 BM25Okapi 实例。
 
         优先使用传入的 Document 列表（create 时），
         否则从已加载的 ChromaDB 集合中读取全部文档。
@@ -152,15 +181,22 @@ class VectorStoreManager:
             self._bm25_index = None
 
     def _ensure_bm25(self):
-        """确保 BM25 索引已构建（懒加载）"""
+        """确保 BM25 索引已构建（懒加载触发器）"""
         if self._bm25_index is None and self._vector_store is not None:
             self._build_bm25_index()
 
-    # ────────── Cross-Encoder 重排序 ──────────
+    # ══════════════════════════════════════════
+    #  Cross-Encoder 重排序
+    # ══════════════════════════════════════════
 
     @property
     def reranker(self):
-        """懒加载 Cross-Encoder 重排序模型"""
+        """
+        懒加载 Cross-Encoder 重排序模型
+
+        模型: cross-encoder/ms-marco-MiniLM-L-6-v2
+        依赖: sentence-transformers 库（可选，未安装时静默跳过）
+        """
         if self._reranker is None and APP_CONFIG.use_reranking:
             try:
                 from sentence_transformers import CrossEncoder
@@ -175,11 +211,26 @@ class VectorStoreManager:
                 logger.warning(f"⚠️ Cross-Encoder 加载失败: {e}")
         return self._reranker
 
-    # ────────── 相似度搜索（稠密） ──────────
+    # ══════════════════════════════════════════
+    #  相似度搜索（纯稠密）
+    # ══════════════════════════════════════════
 
     def similarity_search(self, query: str, k: int = None,
                           score_threshold: float = None) -> List[Document]:
-        """纯稠密向量检索（兼容旧接口）"""
+        """
+        纯稠密向量检索（兼容旧接口）
+
+        内部调用 ChromaDB 的 similarity_search_with_relevance_scores()，
+        然后按 score_threshold 过滤。
+
+        Args:
+            query: 查询文本
+            k: 返回文档数（默认 APP_CONFIG.retrieval_k）
+            score_threshold: 相似度阈值（默认 APP_CONFIG.retrieval_score_threshold）
+
+        Returns:
+            过滤后的 Document 列表
+        """
         if k is None:
             k = APP_CONFIG.retrieval_k
         if score_threshold is None:
@@ -199,18 +250,28 @@ class VectorStoreManager:
             logger.exception(f"❌ 搜索失败（query前50字: {query[:50]}）")
             return []
 
-    # ────────── 混合检索 + 重排序（主入口） ──────────
+    # ══════════════════════════════════════════
+    #  混合检索 + 重排序（主入口）
+    # ══════════════════════════════════════════
 
     def hybrid_search(self, query: str, k: int = None) -> List[Document]:
         """
         混合检索 (BM25 + Dense + RRF) → 可选 Cross-Encoder 重排序 → 返回 Top-K
 
         流水线:
-          Step 1: ChromaDB 稠密检索 Top-N (N = hybrid_prefetch_k)
+          Step 1: ChromaDB 稠密检索 Top-N（N = hybrid_prefetch_k）
+                  → 存入 all_docs_dict，格式: (doc, dense_score, 0.0, dense_rank)
           Step 2: BM25 稀疏检索 Top-N
-          Step 3: RRF 融合 (reciprocal_rank = 1 / (rrf_k + rank))
+                  → BM25 独有的文档存入 all_docs_dict: (doc, 0.0, bm25_score, None)
+                  → 稠密也命中的文档: 更新 bm25_score，保持 dense_rank
+          Step 3: RRF 融合
+                  → 稠密 rank 非 None 时贡献 1/(rrf_k + rank + 1)
+                  → BM25 rank 从 _bm25_docs 列表中查找，贡献 1/(rrf_k + rank + 1)
           Step 4: Cross-Encoder 重排序（若启用且模型可用）
           Step 5: 返回 Top-K
+
+        注意: BM25 独有的文档在 dense_rank 位置存 None，避免 RRF 将 BM25 rank
+              错误地计入稠密分数（这是之前版本存在的 double-count bug）。
         """
         if k is None:
             k = APP_CONFIG.retrieval_k
@@ -221,7 +282,7 @@ class VectorStoreManager:
             return []
 
         prefetch_k = APP_CONFIG.hybrid_prefetch_k
-        all_docs_dict = {}
+        all_docs_dict = {}  # doc_id → (doc, dense_score, bm25_score, dense_rank)
         seen_ids = set()
 
         # ── Step 1: 稠密检索 ──
@@ -231,6 +292,7 @@ class VectorStoreManager:
             )
             for rank, (doc, score) in enumerate(dense_results):
                 doc_id = self._doc_id(doc)
+                # tuple: (Document, dense_score, bm25_score, dense_rank)
                 all_docs_dict[doc_id] = (doc, score, 0.0, rank)
                 seen_ids.add(doc_id)
             logger.info(f"🔍 稠密检索完成: {len(dense_results)} 个结果")
@@ -253,10 +315,12 @@ class VectorStoreManager:
                 for rank, idx in enumerate(ranked_indices):
                     doc_id, text, meta = self._bm25_docs[idx]
                     if doc_id not in seen_ids:
+                        # BM25 独有的文档: dense_rank 设为 None，避免 RRF 中重复计分
                         bm25_doc = Document(page_content=text, metadata=meta)
-                        all_docs_dict[doc_id] = (bm25_doc, 0.0, float(bm25_scores[idx]), rank)
+                        all_docs_dict[doc_id] = (bm25_doc, 0.0, float(bm25_scores[idx]), None)
                         seen_ids.add(doc_id)
                     else:
+                        # 稠密也命中的文档: 更新 bm25_score，保持已有 dense_rank
                         existing = all_docs_dict[doc_id]
                         all_docs_dict[doc_id] = (
                             existing[0], existing[1], float(bm25_scores[idx]), existing[3]
@@ -275,8 +339,10 @@ class VectorStoreManager:
         scored_docs = []
         for doc_id, (doc, dense_score, bm25_score, dense_rank) in all_docs_dict.items():
             rrf = 0.0
+            # 稠密贡献: 只在 dense_rank 不为 None 时计分
             if dense_rank is not None:
                 rrf += 1.0 / (rrf_k_const + dense_rank + 1)
+            # BM25 贡献: 从 _bm25_docs 列表中查找 rank
             bm25_rank = next(
                 (i for i, (did, _, _) in enumerate(self._bm25_docs) if did == doc_id),
                 None
@@ -306,14 +372,21 @@ class VectorStoreManager:
         logger.info(f"📚 最终返回 {len(final_docs)} 个文档")
         return final_docs
 
-    # ────────── 工具方法 ──────────
+    # ══════════════════════════════════════════
+    #  工具方法
+    # ══════════════════════════════════════════
 
     @staticmethod
     def _doc_id(doc: Document) -> str:
+        """生成文档的唯一标识（source + chunk_index）"""
         return f"{doc.metadata.get('source', '')}_{doc.metadata.get('chunk_index', '')}"
 
     def get_retriever(self, k: int = None, score_threshold: float = None):
-        """获取 LangChain Retriever 对象（兼容旧接口）"""
+        """
+        获取 LangChain Retriever 对象（兼容旧接口）
+
+        返回 ChromaDB 的 as_retriever() 包装，支持 LangChain 原生链调用。
+        """
         vector_store = self._vector_store
         if not vector_store:
             return None
