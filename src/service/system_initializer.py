@@ -13,7 +13,7 @@
   4. ToolManager          — 工具管理器（无依赖）
   5. MedicalAgent         — LangGraph Agent（依赖 1/2/3/4）
 
-医疗聊天机器人 MedicalChatbot 已被移除，路由层直接使用 MedicalAgent。
+注: MedicalChatbot 包装层已移除，路由层直接使用 MedicalAgent。
 """
 from typing import Tuple
 from src.utils.logger_config import logger
@@ -28,29 +28,33 @@ from src.service.agent import MedicalAgent
 
 class SystemInitializer:
     """
-    系统初始化器
+    系统初始化器 — 管理所有核心组件的生命周期。
 
-    管理所有核心组件的生命周期。组件由 initialize_system() 延迟触发初始化。
-    chat_router.py 和 cli_router.py 通过访问本类的属性获取组件实例（如 system_initializer.agent）。
+    chat_router.py / cli_router.py 通过访问本类的属性获取组件实例:
+      system_initializer.agent
+      system_initializer.vector_store
+      system_initializer.intent_classifier
+      等
     """
 
     def __init__(self):
-        self.vector_store = None      # VectorStoreManager 实例
-        self.memory_store = None      # MemoryStore 实例（Redis）
-        self.intent_classifier = None # IntentClassifier 实例
-        self.tool_manager = None      # ToolManager 实例
-        self.agent = None             # MedicalAgent 实例（核心组件）
-        self.initialized = False      # 是否完成初始化
-        self.init_errors = []         # 初始化过程中的错误列表
+        self.vector_store = None          # VectorStoreManager 实例
+        self.memory_store = None          # MemoryStore 实例（Redis）
+        self.intent_classifier = None     # IntentClassifier 实例
+        self.tool_manager = None          # ToolManager 实例
+        self.agent = None                 # MedicalAgent 实例
+        self.initialized = False          # 初始化完成标记
+        self.init_errors = []             # 初始化错误列表
 
     def initialize_system(self) -> Tuple[object, object, object]:
         """
-        按依赖顺序初始化所有组件
+        按依赖顺序初始化所有组件。
 
         每个组件初始化独立 try/except，单组件失败不影响其他组件。
+        初始化前先检查 Ollama 服务是否可达（仅记录，不阻塞）。
 
         Returns:
-            (vector_store, intent_classifier, agent) — 三个核心组件引用
+            (vector_store, intent_classifier, agent) 三个核心组件引用
         """
         logger.info("🔄 开始初始化医疗AI系统...")
         logger.info(f"📁 项目根目录: {APP_CONFIG.project_root}")
@@ -96,11 +100,11 @@ class SystemInitializer:
 
     def _initialize_vector_store(self):
         """
-        初始化 ChromaDB 向量存储
+        初始化 ChromaDB 向量存储。
 
         策略:
-          - 存在缓存且非空 → 直接加载（懒加载，首次搜索时建立 BM25 索引）
-          - 不存在或为空   → 从 data/disease/ 加载文档 → 分块 → 创建 Chroma 集合 + BM25 索引
+          - 缓存存在且非空 → 直接加载现有集合（BM25 索引首次搜索时懒加载）
+          - 缓存不存在/为空 → 从 data/disease/ 加载文档 → 分块 → 创建集合 + BM25
         """
         logger.info("📦 初始化 ChromaDB 向量存储...")
         try:
@@ -140,11 +144,12 @@ class SystemInitializer:
 
     def _initialize_memory_store(self):
         """
-        初始化 Redis 对话记忆存储
+        初始化 Redis 对话记忆存储。
 
         容错:
-          - Redis 连接失败时记录警告，返回一个无连接的 MemoryStore 实例
+          - Redis 连接失败时记录警告，返回无连接的 MemoryStore 实例
           - 后续所有读写操作静默返回空结果，不影响主流程
+          - 通过 MemoryStore.__new__ 创建空实例，避免调用方做 None 检查
         """
         logger.info("💾 初始化 Redis 对话记忆...")
         try:
@@ -158,16 +163,16 @@ class SystemInitializer:
             err_msg = f"Redis 记忆存储初始化失败: {e}"
             logger.warning(f"⚠️ {err_msg}，对话记忆将降级")
             self.init_errors.append(err_msg)
-            # 返回一个无连接的 MemoryStore 实例，避免调用方做 None 检查
             return MemoryStore.__new__(MemoryStore)
 
     def _initialize_intent_classifier(self):
         """
-        初始化意图分类器
+        初始化意图分类器。
 
-        内部使用双引擎:
-          1. BERT 分类器（sentence-transformers，~50ms，可离线）
-          2. LLM 分类器（OllamaLLM，~2s，依赖 Ollama）
+        内部使用三引擎级联:
+          1. BERT 分类器（sentence-transformers，~50ms，可离线，可选配置）
+          2. LLM 分类器（OllamaLLM，~2s，依赖 Ollama 服务）
+          3. 关键词规则兜底（~1ms）
         """
         logger.info("🎯 初始化意图分类器...")
         try:
@@ -181,7 +186,7 @@ class SystemInitializer:
             return None
 
     def _initialize_tool_manager(self):
-        """初始化工具管理器（天气查询 + 通用闲聊）"""
+        """初始化工具管理器（天气查询 + 通用闲聊 LLM）"""
         logger.info("🛠️ 初始化工具管理器...")
         try:
             tm = ToolManager()
@@ -195,12 +200,10 @@ class SystemInitializer:
 
     def _initialize_agent(self):
         """
-        初始化 LangGraph Agent
+        初始化 LangGraph Agent。
 
-        依赖 vector_store / memory_store / intent_classifier / tool_manager 已就绪。
-        intent_classifier 不可用时跳过初始化（无法做意图路由）。
-
-        MedicalChatbot 包装层已被移除，路由层直接使用 agent。
+        依赖: vector_store, memory_store, intent_classifier, tool_manager
+        已就绪。intent_classifier 不可用时跳过（无法做意图路由）。
         """
         if self.intent_classifier is None:
             logger.warning("⚠️ 意图分类器未就绪，跳过 Agent 初始化")
@@ -224,5 +227,4 @@ class SystemInitializer:
 
 
 # 全局单例，由 main.py 的 startup 事件或 cli_router 触发初始化
-# chat_router.py / cli_router.py 通过 from ... import system_initializer 访问
 system_initializer = SystemInitializer()

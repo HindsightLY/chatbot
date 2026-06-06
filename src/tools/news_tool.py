@@ -1,6 +1,7 @@
 """
-新闻获取工具
-封装聚合数据新闻 API (https://www.juhe.cn/docs/api/id/235)
+新闻获取工具 — 聚合数据新闻 API 封装
+
+API: https://www.juhe.cn/docs/api/id/235
 
 被 chat_router.py 的 /api/chat/daily_news 接口调用:
   get_daily_news() → JuHeNewsClient.get_daily_news()
@@ -14,7 +15,7 @@ from pydantic import BaseModel
 
 class JuHeNewsClient:
     """
-    聚合新闻 API 客户端
+    聚合数据新闻 API 客户端。
 
     API Key 优先级: 构造参数 > 环境变量 JUHE_NEWS_API_KEY > 默认值
     """
@@ -25,14 +26,14 @@ class JuHeNewsClient:
 
     def get_daily_news(self, news_type="top"):
         """
-        调用聚合数据 API 获取新闻
+        调用聚合数据新闻 API 获取分类新闻。
 
         Args:
-            news_type: 新闻分类 (top/shehui/guonei/guoji/yule/tiyu/junshi/keji/caijing/shishang)
+            news_type: 新闻分类（top/shehui/guonei/guoji/yule/tiyu/junshi/keji/caijing/shishang）
 
         Returns:
-            {"success": bool, "news": list, "total": int}
-            或 {"success": False, "error": str, "reason": str}
+            成功: {"success": True, "news": [{"title", "date", "url", "author_name", "thumbnail_pic_s"}, ...], "total": int}
+            失败: {"success": False, "error": str, "reason": str}
         """
         params = {
             "type": news_type,
@@ -90,12 +91,12 @@ def get_daily_news(news_type="top"):
 
 
 class NewsRequest(BaseModel):
-    """新闻请求"""
+    """新闻请求体"""
     news_type: str = "top"
 
 
 class NewsResponse(BaseModel):
-    """新闻响应"""
+    """新闻响应体"""
     success: bool
     news: list = []
     total: int = 0

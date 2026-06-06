@@ -1,14 +1,14 @@
 """
-主应用入口
+主应用入口 — 医疗咨询 AI 系统
 
-两种运行模式:
-  python main.py --api   → FastAPI 服务 (默认，自动打开浏览器)
+运行模式:
+  python main.py --api   → FastAPI 服务（默认，自动打开浏览器）
   python main.py         → CLI 交互界面
 
 启动流程:
-  1. 确保数据目录存在 (ensure_data_dirs)
-  2. 创建 FastAPI 实例并注册路由、挂载静态文件
-  3. API 模式: uvicorn 启动 → startup 事件初始化系统组件 → 自动打开页面
+  1. 设置 HuggingFace 国内镜像 + 强制离线（环境变量优先于模型下载）
+  2. 确保 data/disease/chroma_db 目录存在
+  3. API 模式: FastAPI + uvicorn → startup 事件初始化系统 → 浏览器自动打开
   4. CLI 模式: run_cli() 直接触发初始化
 """
 import sys
@@ -52,7 +52,14 @@ if static_dir.is_dir():
 
 @app.on_event("startup")
 def startup_event():
-    """FastAPI 启动时初始化系统组件（容错：组件失败不影响服务启动）"""
+    """
+    FastAPI 启动事件 — 初始化系统全部组件。
+
+    容错设计:
+      - system_initializer.initialize_system() 内部每个组件独立 try/except
+      - 单组件失败不影响其他组件，API 以降级模式运行
+      - 不影响 FastAPI 服务进程本身
+    """
     logger.info("🚀 正在初始化医疗AI系统...")
     try:
         system_initializer.initialize_system()
@@ -72,7 +79,7 @@ def startup_event():
 
 
 def open_browser(host: str, port: int):
-    """延迟打开浏览器，等待服务器就绪"""
+    """延迟 1.5s 后自动打开浏览器访问 API 地址"""
     import time
     time.sleep(1.5)
     url = f"http://{host if host != '0.0.0.0' else '127.0.0.1'}:{port}"

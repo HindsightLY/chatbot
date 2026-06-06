@@ -1,10 +1,11 @@
 """
-天气查询工具
-调用高德地图天气 API 获取实时天气
+天气查询工具 — 高德地图天气 API 封装
 
 被 tool_manager.py 的 get_weather_response() 调用:
   extract_city_from_text()  →  search_weather()  →  LLM 润色
   extract_city_by_llm()    ↗
+
+API: 高德地图 Web 服务 — 天气查询（实时）
 """
 import requests
 from config.app_config import APP_CONFIG
@@ -13,13 +14,15 @@ from src.utils.logger_config import logger
 
 def search_weather(city: str):
     """
-    高德天气 API 封装
+    调用高德地图天气 API 获取指定城市的实时天气。
 
     Args:
         city: 城市名（如 "北京"）
 
     Returns:
-        格式化天气描述字符串，或错误信息
+        格式化后的天气描述字符串:
+          "{city}的天气情况：\n天气: ...\n温度: ...°C\n湿度: ...%\n风向: ...\n风力: ...级"
+        异常时返回中文错误描述。
     """
     params = {
         'key': APP_CONFIG.amap_api_key,

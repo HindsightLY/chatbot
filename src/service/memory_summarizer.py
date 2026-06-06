@@ -1,27 +1,22 @@
 """
-分层记忆模块 (Hierarchical Memory)
+分层记忆模块 — 长对话历史摘要与语义检索
 
-职责:
-  1. 定期对超过 max_history_turns 的对话进行摘要，存入 Redis
-  2. 在新轮次查询时，检索与当前问题相关的历史摘要
-  3. 将相关摘要与近期对话历史合并，形成完整上下文
+核心机制:
+  1. 当近期对话超过 memory_summary_turns 条时，将最旧的一批摘要后移出 Redis 列表
+  2. 摘要使用 LLM 生成（医疗专用 prompt），保留症状、用药等关键信息
+  3. 新轮次查询时用 OllamaEmbeddings 对历史摘要做余弦相似度检索
+  4. 将相关摘要拼入近期对话历史，形成完整上下文输入给 Agent
 
-存储结构 (Redis):
-  - chat:{session_id}:messages       近期逐条对话 (原有)
-  - chat:{session_id}:summaries      历史摘要列表 (新增)
+Redis 存储结构:
+  - chat:{session_id}:messages      近期对话（List，原有）
+  - chat:{session_id}:summaries     历史摘要（List，新增）
       每个元素: {"summary": str, "start_time": str, "end_time": str, "turn_count": int}
 
-检索方式:
-  - 使用 OllamaEmbeddings 将查询编码为向量
-  - 对每条摘要也编码为向量（摘要写入时预计算并缓存）
-  - 余弦相似度排序 → 返回 Top-K 相关摘要
-  - 若 embedding 不可用，回退为简单的关键词匹配
-
-配置:
-  - use_hierarchical_memory: 启用/禁用
-  - memory_summary_turns: 多少轮后触发摘要 (默认 20)
-  - memory_summary_max_age: 保留的最大摘要数量 (默认 30)
-  - memory_retrieval_k: 检索到的相关摘要数量 (默认 3)
+配置项:
+  - use_hierarchical_memory: 是否启用分层记忆
+  - memory_summary_turns:    触发摘要的对话轮数阈值（默认 20）
+  - memory_summary_max_age:  保留的最大摘要数（默认 30）
+  - memory_retrieval_k:      检索返回的相关摘要数（默认 3）
 """
 import json
 from datetime import datetime
@@ -52,9 +47,9 @@ class MemorySummarizer:
     分层记忆管理器
 
     职责:
-      - 对话摘要生成与存储
-      - 历史摘要的语义检索
-      - 与现有 MemoryStore 的 get_history_text 配合使用
+      - 对话摘要生成与存储（check_and_summarize 定期触发）
+      - 历史摘要语义检索（retrieve_relevant_summaries，余弦相似度 Top-K）
+      - 拼接增强上下文（get_enhanced_history = 近期对话 + 相关摘要）
     """
 
     def __init__(self, memory_store, llm: ChatOllama = None):
@@ -66,10 +61,11 @@ class MemorySummarizer:
         )
         self._embedding = None
 
-    # ────────── Embedding 懒加载 ──────────
+    # ────────── Embedding 懒加载（首次检索时初始化） ──────────
 
     @property
     def embedding(self):
+        """OllamaEmbeddings 懒加载，仅在需要语义检索时创建"""
         if self._embedding is None:
             try:
                 self._embedding = OllamaEmbeddings(
@@ -89,7 +85,15 @@ class MemorySummarizer:
     # ────────── 摘要生成 ──────────
 
     def summarize_conversation(self, messages: List[Dict]) -> str:
-        """调用 LLM 对一段对话进行摘要"""
+        """
+        调用 LLM 对一段对话进行医学摘要。
+
+        Args:
+            messages: 对话消息列表，每项含 role/content/timestamp
+
+        Returns:
+            摘要文本，失败时返回空字符串
+        """
         if not messages:
             return ""
 
@@ -113,11 +117,11 @@ class MemorySummarizer:
 
     def store_summary(self, session_id: str, messages: List[Dict]):
         """
-        对消息列表做摘要并存入 Redis
+        对消息列表做摘要并存入 Redis List（rpush）。
 
         Args:
             session_id: 会话 ID
-            messages: 待摘要的消息列表
+            messages:   待摘要的消息列表（摘要后从 messages 中清除）
         """
         if not messages:
             return
@@ -147,10 +151,10 @@ class MemorySummarizer:
 
     def get_all_summaries(self, session_id: str) -> List[Dict]:
         """
-        从 Redis 获取全部历史摘要
+        从 Redis 获取全部历史摘要列表。
 
         Returns:
-            [{"summary": str, "start_time": str, "end_time": str, "turn_count": int}]
+            [{"summary": str, "start_time": str, "end_time": str, "turn_count": int}, ...]
         """
         rc = self.memory_store.client if hasattr(self.memory_store, 'client') else None
         if rc:
@@ -166,15 +170,21 @@ class MemorySummarizer:
 
     def retrieve_relevant_summaries(self, session_id: str, query: str, k: int = None) -> List[str]:
         """
-        根据当前查询，从历史摘要中检索最相关的 Top-K 条
+        根据当前查询，从历史摘要中检索最相关的 Top-K 条。
+
+        检索流程:
+          1. 获取全部历史摘要（Redis lrange）
+          2. query 编码为向量，各摘要编码为向量（OllamaEmbeddings）
+          3. 余弦相似度排序 → 取 Top-K
+          4. 若 embedding 不可用，直接返回最近 K 条作为回退
 
         Args:
             session_id: 会话 ID
-            query: 当前用户问题
-            k: 返回条数
+            query:      当前用户问题
+            k:          返回条数（默认 APP_CONFIG.memory_retrieval_k）
 
         Returns:
-            相关摘要文本列表
+            相关摘要文本列表，按相似度降序
         """
         if k is None:
             k = APP_CONFIG.memory_retrieval_k
@@ -212,12 +222,18 @@ class MemorySummarizer:
     def get_enhanced_history(self, session_id: str, query: str,
                              recent_n: int = None) -> str:
         """
-        获取增强后的对话历史文本（近期对话 + 相关历史摘要）
+        获取增强后的对话历史文本（近期对话 + 相关历史摘要）。
+
+        当 use_hierarchical_memory 关闭时仅返回近期对话。
+        检索到的摘要拼在近期对话末尾，构造格式:
+          【历史对话摘要（与当前问题相关）】
+          摘要 1: ...
+          摘要 2: ...
 
         Args:
             session_id: 会话 ID
-            query: 当前用户问题（用于检索相关摘要）
-            recent_n: 最近 N 轮对话数
+            query:      当前用户问题（用于检索相关摘要）
+            recent_n:   返回的近期对话轮数
 
         Returns:
             合并后的对话历史文本
@@ -241,10 +257,17 @@ class MemorySummarizer:
 
     def check_and_summarize(self, session_id: str):
         """
-        检查是否需要触发摘要。当消息数量 > memory_summary_turns 时，
-        将最旧的 memory_summary_turns 条摘要后清除。
+        检查并触发摘要。
 
-        被 _save_memory 或每次消息写入后周期调用。
+        触发条件:
+          - use_hierarchical_memory 已启用
+          - memory_summary_turns > 0
+          - 当前消息数 > memory_summary_turns
+
+        动作:
+          1. 取最旧的 memory_summary_turns 条消息
+          2. 送 LLM 生成摘要并存入 Redis summaries 列表
+          3. 从 messages 列表中 ltrim 已摘要的旧消息
         """
         threshold = APP_CONFIG.memory_summary_turns
         if threshold <= 0:

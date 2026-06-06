@@ -1,11 +1,10 @@
 """
-工具管理服务
-为非医疗意图（闲聊、天气等）提供 LLM 响应
+工具管理服务 — 为非医疗意图（闲聊、天气等）提供 LLM 响应
 
 调用链:
   chat_router / cli_router
-    → is_weather_query()     [text_utils.py]
-        → True  → get_weather_response()  → search_weather()  [weather_tool.py]
+    → is_weather_query()           [text_utils.py]
+        → True  → get_weather_response() → search_weather()  [weather_tool.py]
         → False → handle_general_query()
 """
 from typing import Optional
@@ -19,11 +18,11 @@ from src.utils.text_utils import extract_city_from_text
 
 class ToolManager:
     """
-    非 RAG 工具的管理器
+    非 RAG 工具管理器
 
     职责:
-      - 天气查询（两阶段城市提取 → 高德 API → LLM 润色）
-      - 通用闲聊（直接走 LLM）
+      - 天气查询: 正则 → LLM 兜底提取城市 → 高德 API → LLM 润色
+      - 通用闲聊 / 系统查询: 直接走 LLM 生成回复
     """
 
     def __init__(self):
@@ -42,10 +41,13 @@ class ToolManager:
 
     def extract_city_by_llm(self, query: str) -> Optional[str]:
         """
-        两阶段城市提取中的 LLM 兜底策略
+        两阶段城市提取中的 LLM 兜底。
 
-        当正则提取失败时，用 LLM 做语义理解。
-        输出后过滤常见无效词，防止幻觉。
+        当 text_utils.extract_city_from_text 的正则+列表匹配失败后，
+        用 LLM 做语义理解提取城市名。输出后过滤常见无效词防止幻觉。
+
+        Returns:
+            城市名，或 None（未识别）
         """
         extraction_prompt = f"""
         请从以下句子中提取出城市名称。只返回城市名称，不要有任何其他文字。
@@ -67,11 +69,19 @@ class ToolManager:
 
     def get_weather_response(self, query: str) -> str:
         """
-        天气查询处理流水线:
-          1. extract_city_from_text()  — 正则快速匹配
-          2. extract_city_by_llm()     — LLM 语义兜底
-          3. search_weather()          — 高德 API
-          4. LLM 润色输出             — 将天气数据转为自然语言
+        天气查询处理流水线。
+
+        步骤:
+          1. 正则快速匹配城市（extract_city_from_text）
+          2. LLM 语义兜底（extract_city_by_llm）
+          3. 高德天气 API 查询（search_weather）
+          4. LLM 将结构化天气数据润色为自然语言回复
+
+        Args:
+            query: 用户输入，如 "北京天气"
+
+        Returns:
+            自然语言天气回答，或提示用户提供城市名称
         """
         city = extract_city_from_text(query)
 
@@ -93,11 +103,16 @@ class ToolManager:
 
     def handle_general_query(self, query: str, additional_context: str = "") -> str:
         """
-        通用闲聊/系统查询
+        通用闲聊 / 系统查询。
+
+        将用户输入和可选上下文拼入 prompt 交给 LLM 生成回答。
 
         Args:
-            query: 用户输入
-            additional_context: 可选的额外上下文（如系统信息）
+            query:              用户输入
+            additional_context: 可选额外上下文（如系统功能说明）
+
+        Returns:
+            LLM 生成的回答文本
         """
         formatted_prompt = self.general_prompt_template.format(
             query=query,
@@ -106,5 +121,4 @@ class ToolManager:
         return self.general_llm.invoke(formatted_prompt)
 
 
-# 全局单例，由 chat_router / cli_router 直接引用
 tool_manager = ToolManager()

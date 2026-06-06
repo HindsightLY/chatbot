@@ -1,12 +1,12 @@
 """
-Redis 对话记忆模块
-使用 Redis 存储会话历史，替代原 HybridChatMemory（内存+FAISS）
+Redis 对话记忆模块 — 按 session_id 存储/读取对话历史
 
 存储结构:
-  key: chat:{session_id}:messages (Redis List)
-  value: JSON 格式 {"role": "user"/"assistant", "content": "...", "timestamp": "..."}
+  key:  chat:{session_id}:messages (Redis List)
+  value: {"role": "user"|"assistant", "content": str, "timestamp": str}  (JSON)
 
-过期策略: 每轮对话写入后刷新 TTL（默认 24 小时）
+过期策略: 每次 rpush 后重新 expire，TTL 来自 APP_CONFIG.redis_ttl（默认 86400s）
+回退策略: Redis 不可用时静默降级（client 返回 None），不影响主流程
 """
 import json
 from datetime import datetime
@@ -21,26 +21,30 @@ class MemoryStore:
     Redis 对话记忆存储
 
     职责:
-      - 按 session_id 存储对话历史
-      - 提供最近 N 轮对话的读取
-      - 自动过期清理
+      - 按 session_id 存储/追加对话历史（add_message）
+      - 读取最近 N 轮对话（get_recent_messages / get_history_text）
+      - 清除指定会话（clear_session）
+      - Redis 不可用时静默降级，不阻塞业务流程
     """
 
     def __init__(self):
         self.max_history_turns = 10
         self._client = None
-        # 预触发懒加载，使调用方首次使用时无需等待
         _ = self.client
 
     @property
     def client(self):
-        """懒加载 Redis 连接"""
+        """Redis 连接的懒加载属性，首次访问时调用 _connect"""
         if self._client is None:
             self._connect()
         return self._client
 
     def _connect(self):
-        """建立 Redis 连接"""
+        """
+        建立 Redis 连接。
+
+        连接失败时不抛出异常，client 保持 None，后续写入/读取均静默跳过。
+        """
         try:
             self._client = redis.Redis(
                 host=APP_CONFIG.redis_host,
@@ -58,17 +62,16 @@ class MemoryStore:
             self._client = None
 
     def _key(self, session_id: str) -> str:
-        """构造 Redis key"""
         return f"chat:{session_id}:messages"
 
     def add_message(self, session_id: str, role: str, content: str):
         """
-        添加一条消息到 Redis
+        添加一条消息到 Redis List（尾部 rpush），刷新 TTL。
 
         Args:
             session_id: 会话 ID
-            role: "user" 或 "assistant"
-            content: 消息内容
+            role:       "user" 或 "assistant"
+            content:    消息文本
         """
         message = {
             "role": role,
@@ -88,14 +91,15 @@ class MemoryStore:
 
     def get_recent_messages(self, session_id: str, n: int = None) -> List[Dict]:
         """
-        获取最近 N 条消息
+        获取最近 N 条消息（从尾部倒序取 N 条）。
 
         Args:
             session_id: 会话 ID
-            n: 返回条数，默认 self.max_history_turns
+            n:          返回条数，默认 self.max_history_turns
 
         Returns:
-            消息列表，每项 {"role": str, "content": str, "timestamp": str}
+            [{"role": str, "content": str, "timestamp": str}, ...]
+            列表顺序与存储顺序一致（最早 → 最晚）
         """
         if n is None:
             n = self.max_history_turns
@@ -113,14 +117,14 @@ class MemoryStore:
 
     def get_history_text(self, session_id: str, n: int = None) -> str:
         """
-        将最近 N 轮对话格式化为文本，供 prompt 使用
+        将最近 N 轮对话格式化为文本，供 Agent prompt 使用。
 
         Args:
             session_id: 会话 ID
-            n: 返回轮数，默认 self.max_history_turns
+            n:          返回轮数，默认 self.max_history_turns
 
         Returns:
-            格式化后的对话文本
+            格式化后的对话文本，每轮包含 role + content + 分隔线
         """
         messages = self.get_recent_messages(session_id, n)
         if not messages:
@@ -136,7 +140,12 @@ class MemoryStore:
         return "\n".join(lines)
 
     def clear_session(self, session_id: str):
-        """清除指定会话的全部历史"""
+        """
+        清除指定会话的全部历史消息。
+
+        Args:
+            session_id: 会话 ID
+        """
         rc = self.client
         if rc:
             try:

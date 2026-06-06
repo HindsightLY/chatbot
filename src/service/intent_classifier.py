@@ -1,17 +1,13 @@
 """
-意图分类器模块
-双引擎分类器：BERT 优先（~50ms），LLM 兜底（~2s）
+意图分类器模块 — 三引擎级联分类
 
 分类结果:
-  medical_inquiry → MedicalChatbot (RAG)
-  chat_general   → ToolManager (天气/闲聊)
-  system_query   → ToolManager (通用 LLM)
+  medical_inquiry → RAG 医疗问答
+  chat_general   → 天气查询 / 通用闲聊
+  system_query   → 系统功能回答
   unknown        → 兜底走 RAG
 
-引擎选择:
-  1. BertIntentClassifier  — sentence-transformers 多头匹配（快速，可离线）
-  2. IntentClassifier      — OllamaLLM JSON prompt（稳重，依赖 Ollama）
-  3. 两者均不可用 → keyword 规则兜底
+引擎链路: BERT（~50ms）→ LLM（~2s）→ 关键词规则（~1ms），不可用时依次降级
 """
 import json
 from langchain_ollama import OllamaLLM
@@ -21,17 +17,20 @@ from src.utils.logger_config import logger
 
 class IntentClassifier:
     """
-    双引擎意图分类器
+    三引擎级联意图分类器
 
-    使用 BERT(sentence-transformers) 优先，OllamaLLM 兜底，
-    两者均不可用时使用关键词规则匹配。
+    引擎优先级:
+      1. BERT (sentence-transformers) — 多头语义匹配，快速可离线
+      2. LLM (Ollama)                 — JSON prompt 结构化分类
+      3. 关键词规则                   — 最轻量兜底
+
+    引擎 1 返回 None 或 unknown 时自动降级至引擎 2，
+    引擎 2 异常时降级至引擎 3，确保最大可用性。
     """
 
     def __init__(self, model_name: str = "qwen2.5:7b"):
-        self.llm = OllamaLLM(
-            model=model_name,
-            base_url=APP_CONFIG.llm_base_url,
-        )
+        """初始化 LLM 分类引擎 + 条件初始化 BERT 引擎"""
+        self.llm = OllamaLLM(model=model_name, base_url=APP_CONFIG.llm_base_url)
 
         self.bert = None
         if APP_CONFIG.use_bert_classifier:
@@ -41,6 +40,7 @@ class IntentClassifier:
             except Exception as e:
                 logger.warning(f"⚠️ BERT 分类器实例化失败: {e}")
 
+        # LLM 分类用的意图 Schema（描述 + 关键词辅助语义理解）
         self.intent_schema = {
             "intents": [
                 {
@@ -61,10 +61,15 @@ class IntentClassifier:
             ]
         }
 
-    # ── 关键词规则兜底 ──
+    # ── 引擎 3: 关键词规则兜底 ──
 
     def _keyword_classify(self, query: str) -> str:
-        """关键词规则分类（最轻量兜底）"""
+        """
+        关键词规则分类（最轻量兜底，~1ms）
+
+        对 query 逐词匹配预定义关键词列表，按命中数与阈值判定。
+        medical 和 system 需要 ≥2 个命中避免误判，weather 仅需 ≥1 个。
+        """
         q = query.lower()
         medical_kw = ["病", "症状", "药", "怎么治", "原因", "医生", "医院",
                        "痛", "疼", "发烧", "咳嗽", "感冒", "过敏", "血压",
@@ -86,17 +91,21 @@ class IntentClassifier:
 
     def classify(self, query: str) -> str:
         """
-        意图分类主入口（双引擎）
+        意图分类主入口（三引擎级联）
 
-        优先级:
-          1. BERT (sentence-transformers) — 最快 ~50ms
-          2. LLM (Ollama)                  — 稳重 ~2s
-          3. 关键词规则                    — 兜底
+        级联逻辑:
+          1. BERT 引擎可用且得分 ≥ threshold → 直接返回，跳过后续引擎
+          2. BERT 返回 None/unknown 或异常 → 降级至 LLM
+          3. LLM 解析 JSON 失败或异常 → 降级至关键词规则
+          4. 关键词规则未命中 → 返回 "unknown"（上层将走 RAG 兜底）
+
+        Args:
+            query: 用户输入文本
 
         Returns:
-            'medical_inquiry' | 'chat_general' | 'system_query' | 'unknown'
+            "medical_inquiry" | "chat_general" | "system_query" | "unknown"
         """
-        # ── 引擎 1: BERT ──
+        # ── 引擎 1: BERT 语义匹配 ──
         if self.bert is not None:
             try:
                 result = self.bert.classify(query)
@@ -106,7 +115,7 @@ class IntentClassifier:
             except Exception as e:
                 logger.debug(f"BERT 分类失败，降级到 LLM: {e}")
 
-        # ── 引擎 2: LLM ──
+        # ── 引擎 2: LLM JSON prompt 分类 ──
         prompt = f"""
         你是一个意图分类器。请严格分析用户的输入，并从预定义的 Schema 中选择最匹配的一个意图。
         请只返回 JSON 对象，不要包含任何其他解释文字。
@@ -146,7 +155,7 @@ class IntentClassifier:
         except Exception as e:
             logger.info(f"LLM 分类失败: {e}")
 
-        # ── 引擎 3: 关键词兜底 ──
+        # ── 引擎 3: 关键词规则兜底 ──
         result = self._keyword_classify(query)
         logger.debug(f"关键词兜底分类: {result}")
         return result

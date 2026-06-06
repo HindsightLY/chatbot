@@ -1,11 +1,12 @@
 """
-LangChain 工具集
-使用 @tool 装饰器定义可复用工具，供 Agent 的 bind_tools() + ToolNode 调用
+LangChain 工具集 — 供 Agent 的 bind_tools() + ToolNode 调用
 
 工具列表:
-  search_medical_knowledge  — 医学知识库检索
-  get_weather               — 天气查询
-  chat_general              — 通用闲聊兜底
+  search_medical_knowledge  — 医学知识库检索（支持 HyDE 查询转换 + 混合检索）
+  get_weather               — 天气查询（高德 API）
+  chat_general              — 通用闲聊兜底（Ollama LLM）
+
+延迟导入: 通过 _get_vector_store / _get_llm 避免循环导入
 """
 from langchain_core.tools import tool
 from config.app_config import APP_CONFIG
@@ -14,13 +15,13 @@ from src.utils.logger_config import logger
 
 
 def _get_vector_store():
-    """延迟获取向量存储实例，避免循环导入"""
+    """延迟获取向量存储实例，避免与 system_initializer 循环导入"""
     from src.service.system_initializer import system_initializer
     return system_initializer.vector_store
 
 
 def _get_llm():
-    """延迟获取 LLM 实例（与 agent.py 保持一致使用 ChatOllama）"""
+    """延迟获取 ChatOllama 实例"""
     from langchain_ollama import ChatOllama
     return ChatOllama(
         model=APP_CONFIG.llm_model_name,
@@ -33,7 +34,11 @@ def _get_llm():
 def search_medical_knowledge(query: str) -> str:
     """
     搜索医学知识库，获取与疾病、症状、治疗方法相关的医学资料。
-    当用户询问疾病、症状、用药、治疗方法等医疗相关问题时，调用此工具。
+
+    检索流程:
+      1. 若 use_hyde 启用，先用 HyDE 将 query 转换为假设文档再检索
+      2. 若 use_hybrid_search 启用，执行向量 + BM25 混合检索 + RRF 融合 + 重排序
+      3. 否则执行纯向量相似度搜索
 
     Args:
         query: 用户的医疗问题原文
@@ -70,10 +75,12 @@ def search_medical_knowledge(query: str) -> str:
 def get_weather(location: str) -> str:
     """
     查询指定城市的实时天气信息。
-    当用户询问天气时调用此工具。
+
+    先用 extract_city_from_text 做正则提取，
+    失败后用 location 参数直接调用高德 API。
 
     Args:
-        location: 城市名称，如"北京"、"上海"
+        location: 城市名称，如 "北京"、"上海"
     """
     logger.info(f"🔧 调用工具: get_weather(location='{location}')")
     city = extract_city_from_text(location)
@@ -91,7 +98,8 @@ def get_weather(location: str) -> str:
 def chat_general(query: str) -> str:
     """
     回答用户的一般性问题、闲聊、问候等非医疗非天气问题。
-    仅当问题不涉及疾病症状、不涉及天气查询时使用。
+
+    仅当问题不涉及疾病症状、不涉及天气查询时由 Agent 工具路由触发。
 
     Args:
         query: 用户输入

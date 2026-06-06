@@ -93,18 +93,14 @@ async def api_chat(request: ChatRequest):
         intent = system_initializer.intent_classifier.classify(user_input)
         logger.info(f"🔍 识别意图: {intent}")
 
-        if intent == "medical_inquiry" or intent == "unknown":
+        if intent in ("medical_inquiry", "unknown"):
             # 医疗问题/未知 → Agent 同步推理（走 LangGraph 图）
             answer = agent.run(user_input=user_input, session_id=session_id)
-        elif intent == "chat_general":
-            if is_weather_query(user_input):
-                # 天气查询 → ToolManager 天气流水线
-                answer = system_initializer.tool_manager.get_weather_response(user_input)
-            else:
-                # 闲聊 → ToolManager 通用 LLM
-                answer = system_initializer.tool_manager.handle_general_query(user_input)
-        elif intent == "system_query":
-            # 系统查询 → ToolManager 通用 LLM
+        elif intent == "chat_general" and is_weather_query(user_input):
+            # 天气查询 → 高德 API 天气流水线
+            answer = system_initializer.tool_manager.get_weather_response(user_input)
+        elif intent in ("chat_general", "system_query"):
+            # 闲聊 / 系统查询 → 通用 LLM
             answer = system_initializer.tool_manager.handle_general_query(user_input)
         else:
             # 兜底 → Agent 同步推理

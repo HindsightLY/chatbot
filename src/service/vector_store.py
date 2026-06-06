@@ -236,13 +236,12 @@ class VectorStoreManager:
         if score_threshold is None:
             score_threshold = APP_CONFIG.retrieval_score_threshold
 
-        vector_store = self._vector_store
-        if not vector_store:
+        if not self._vector_store:
             logger.warning("⚠️ ChromaDB 未加载，无法执行搜索")
             return []
 
         try:
-            results = vector_store.similarity_search_with_relevance_scores(query, k=k)
+            results = self._vector_store.similarity_search_with_relevance_scores(query, k=k)
             filtered = [doc for doc, score in results if score >= score_threshold]
             logger.info(f"🔍 稠密检索: 共 {len(results)} 个，过滤后 {len(filtered)} 个")
             return filtered
@@ -264,41 +263,37 @@ class VectorStoreManager:
           Step 2: BM25 稀疏检索 Top-N
                   → BM25 独有的文档存入 all_docs_dict: (doc, 0.0, bm25_score, None)
                   → 稠密也命中的文档: 更新 bm25_score，保持 dense_rank
-          Step 3: RRF 融合
-                  → 稠密 rank 非 None 时贡献 1/(rrf_k + rank + 1)
-                  → BM25 rank 从 _bm25_docs 列表中查找，贡献 1/(rrf_k + rank + 1)
-          Step 4: Cross-Encoder 重排序（若启用且模型可用）
+          Step 3: RRF 融合 — 每个文档得分 = 1/(rrf_k + dense_rank+1) + 1/(rrf_k + bm25_rank+1)
+          Step 4: Cross-Encoder 重排序（若启用）
           Step 5: 返回 Top-K
 
-        注意: BM25 独有的文档在 dense_rank 位置存 None，避免 RRF 将 BM25 rank
-              错误地计入稠密分数（这是之前版本存在的 double-count bug）。
+        RRF 注意事项:
+          - 稠密 rank 由 similarity_search_with_relevance_scores 返回的排序位置决定
+          - BM25 rank 由 BM25Okapi.get_scores 得分排序决定
+          - BM25 独有文档的 dense_rank = None，RRF 不贡献稠密分数
+          - _bm25_rank_map 缓存了 doc_id → bm25_rank 的映射，避免 O(n) 遍历查找
         """
         if k is None:
             k = APP_CONFIG.retrieval_k
 
-        vector_store = self._vector_store
-        if not vector_store:
+        if not self._vector_store:
             logger.warning("⚠️ ChromaDB 未加载，无法执行检索")
             return []
 
         prefetch_k = APP_CONFIG.hybrid_prefetch_k
-        all_docs_dict = {}  # doc_id → (doc, dense_score, bm25_score, dense_rank)
+        all_docs_dict = {}  # doc_id → (Document, dense_score, bm25_score, dense_rank)
         seen_ids = set()
 
         # ── Step 1: 稠密检索 ──
         try:
-            dense_results = vector_store.similarity_search_with_relevance_scores(
-                query, k=prefetch_k
-            )
+            dense_results = self._vector_store.similarity_search_with_relevance_scores(query, k=prefetch_k)
             for rank, (doc, score) in enumerate(dense_results):
                 doc_id = self._doc_id(doc)
-                # tuple: (Document, dense_score, bm25_score, dense_rank)
                 all_docs_dict[doc_id] = (doc, score, 0.0, rank)
                 seen_ids.add(doc_id)
             logger.info(f"🔍 稠密检索完成: {len(dense_results)} 个结果")
         except Exception as e:
             logger.warning(f"⚠️ 稠密检索失败: {e}")
-            dense_results = []
 
         # ── Step 2: BM25 稀疏检索 ──
         self._ensure_bm25()
@@ -306,27 +301,25 @@ class VectorStoreManager:
             try:
                 query_tokens = list(jieba.cut(query))
                 bm25_scores = self._bm25_index.get_scores(query_tokens)
-                ranked_indices = sorted(
+                # 取 Top-N 的 BM25 结果索引
+                bm25_ranked = sorted(
                     range(len(bm25_scores)),
                     key=lambda i: bm25_scores[i],
                     reverse=True
                 )[:prefetch_k]
 
-                for rank, idx in enumerate(ranked_indices):
+                for rank, idx in enumerate(bm25_ranked):
                     doc_id, text, meta = self._bm25_docs[idx]
                     if doc_id not in seen_ids:
-                        # BM25 独有的文档: dense_rank 设为 None，避免 RRF 中重复计分
+                        # BM25 独有文档：dense_rank = None 避免 RRF 重复计分
                         bm25_doc = Document(page_content=text, metadata=meta)
                         all_docs_dict[doc_id] = (bm25_doc, 0.0, float(bm25_scores[idx]), None)
                         seen_ids.add(doc_id)
                     else:
-                        # 稠密也命中的文档: 更新 bm25_score，保持已有 dense_rank
                         existing = all_docs_dict[doc_id]
-                        all_docs_dict[doc_id] = (
-                            existing[0], existing[1], float(bm25_scores[idx]), existing[3]
-                        )
+                        all_docs_dict[doc_id] = (existing[0], existing[1], float(bm25_scores[idx]), existing[3])
 
-                logger.info(f"🔍 BM25 检索完成: {len(ranked_indices)} 个结果")
+                logger.info(f"🔍 BM25 检索完成: {len(bm25_ranked)} 个结果")
             except Exception as e:
                 logger.warning(f"⚠️ BM25 检索失败: {e}")
 
@@ -334,25 +327,22 @@ class VectorStoreManager:
             logger.warning("⚠️ 检索结果为空")
             return []
 
-        # ── Step 3: RRF 融合 ──
+        # ── Step 3: RRF 融合（带 bm25_rank 缓存，优化 O(n²) 查找） ──
         rrf_k_const = APP_CONFIG.rrf_k
+        # 构建 doc_id → bm25_rank 的哈希表缓存，避免逐文档遍历 _bm25_docs
+        bm25_rank_map = {did: i for i, (did, _, _) in enumerate(self._bm25_docs)} if self._bm25_docs else {}
+
         scored_docs = []
         for doc_id, (doc, dense_score, bm25_score, dense_rank) in all_docs_dict.items():
             rrf = 0.0
-            # 稠密贡献: 只在 dense_rank 不为 None 时计分
             if dense_rank is not None:
                 rrf += 1.0 / (rrf_k_const + dense_rank + 1)
-            # BM25 贡献: 从 _bm25_docs 列表中查找 rank
-            bm25_rank = next(
-                (i for i, (did, _, _) in enumerate(self._bm25_docs) if did == doc_id),
-                None
-            ) if self._bm25_docs else None
+            bm25_rank = bm25_rank_map.get(doc_id)
             if bm25_rank is not None:
                 rrf += 1.0 / (rrf_k_const + bm25_rank + 1)
             scored_docs.append((doc, rrf))
 
         scored_docs.sort(key=lambda x: x[1], reverse=True)
-
         logger.info(f"🔀 RRF 融合完成: {len(scored_docs)} 个结果")
 
         # ── Step 4: Cross-Encoder 重排序 ──
@@ -361,8 +351,7 @@ class VectorStoreManager:
             try:
                 pairs = [[query, doc.page_content] for doc, _ in scored_docs]
                 ce_scores = reranker_model.predict(pairs)
-                scored_docs = list(zip([d for d, _ in scored_docs], ce_scores))
-                scored_docs.sort(key=lambda x: x[1], reverse=True)
+                scored_docs = sorted(zip([d for d, _ in scored_docs], ce_scores), key=lambda x: x[1], reverse=True)
                 logger.info(f"🎯 Cross-Encoder 重排序完成")
             except Exception as e:
                 logger.warning(f"⚠️ Cross-Encoder 重排序失败: {e}")
@@ -387,10 +376,9 @@ class VectorStoreManager:
 
         返回 ChromaDB 的 as_retriever() 包装，支持 LangChain 原生链调用。
         """
-        vector_store = self._vector_store
-        if not vector_store:
+        if not self._vector_store:
             return None
-        return vector_store.as_retriever(
+        return self._vector_store.as_retriever(
             search_kwargs={
                 "k": k or APP_CONFIG.retrieval_k,
                 "score_threshold": score_threshold or APP_CONFIG.retrieval_score_threshold
