@@ -12,9 +12,16 @@ BERT 意图分类器
   - sentence-transformers 未安装 → 返回 None（调用方降级到 LLM 分类器）
   - 模型加载失败 → 返回 None
 """
+import os
 import numpy as np
 from config.app_config import APP_CONFIG
 from src.utils.logger_config import logger
+
+# Hugging Face 国内镜像 + 强制离线（使用本地缓存）
+_HF_MIRROR = APP_CONFIG.hf_mirror or os.getenv("HF_ENDPOINT") or os.getenv("HF_MIRROR")
+if _HF_MIRROR:
+    os.environ["HF_ENDPOINT"] = _HF_MIRROR
+os.environ["HF_HUB_OFFLINE"] = "1"
 
 # 每个意图的示例问句（覆盖常见表述）
 INTENT_EXAMPLES = {

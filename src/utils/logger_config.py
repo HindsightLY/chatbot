@@ -27,6 +27,8 @@ def setup_logger():
     root_logger.setLevel(logging.INFO)
 
     if not root_logger.handlers:
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8')
         handler = StreamHandler(sys.stdout)
         handler.setFormatter(formatter)
         root_logger.addHandler(handler)

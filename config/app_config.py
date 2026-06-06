@@ -52,6 +52,9 @@ class AppConfig(BaseModel):
     semantic_chunk_max_size: int = 800
     semantic_chunk_breakpoint_percentile: int = 80
 
+    # ── Hugging Face 镜像 ──
+    hf_mirror: str = "https://hf-mirror.com"
+
     # ── BERT 分类器 ──
     use_bert_classifier: bool = True
     bert_model_name: str = "paraphrase-multilingual-MiniLM-L12-v2"

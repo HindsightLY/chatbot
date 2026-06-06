@@ -11,6 +11,13 @@
   3. API 模式: uvicorn 启动 → startup 事件初始化系统组件 → 自动打开页面
   4. CLI 模式: run_cli() 直接触发初始化
 """
+import sys
+import os
+
+# 强制 HuggingFace 从镜像加载并使用本地缓存（不联网）
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+os.environ["HF_HUB_OFFLINE"] = "1"
+import asyncio
 import webbrowser
 import threading
 import uvicorn
@@ -18,6 +25,11 @@ import argparse
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 from src.utils.logger_config import logger
 from config.app_config import APP_CONFIG
 from src.api.routers.cli_router import run_cli
@@ -78,6 +90,15 @@ if __name__ == "__main__":
 
     if args.api:
         threading.Thread(target=open_browser, args=(args.host, args.port), daemon=True).start()
-        uvicorn.run(app, host=args.host, port=args.port, reload=False)
+        config = uvicorn.Config(app, host=args.host, port=args.port, lifespan="on")
+        server = uvicorn.Server(config)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(server.serve())
+        except KeyboardInterrupt:
+            pass
+        finally:
+            loop.close()
     else:
         run_cli()
