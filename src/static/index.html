@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>医疗咨询 AI</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#f0f2f5;height:100vh;display:flex;justify-content:center;align-items:center}
+.chat-container{width:100%;max-width:720px;height:100vh;max-height:800px;background:#fff;border-radius:0;box-shadow:none;display:flex;flex-direction:column}
+@media(min-width:768px){.chat-container{border-radius:12px;box-shadow:0 2px 16px rgba(0,0,0,.12);height:90vh}}
+.header{padding:16px 20px;border-bottom:1px solid #e8eaed;background:#fff;border-radius:12px 12px 0 0;flex-shrink:0;position:relative}
+.header h1{font-size:18px;color:#1a73e8;font-weight:600}
+.header p{font-size:13px;color:#5f6368;margin-top:2px}
+.messages{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px}
+.message{max-width:85%;padding:10px 14px;border-radius:12px;line-height:1.6;font-size:14px;word-wrap:break-word;white-space:pre-wrap}
+.message.user{align-self:flex-end;background:#1a73e8;color:#fff;border-bottom-right-radius:4px}
+.message.ai{align-self:flex-start;background:#f1f3f4;color:#202124;border-bottom-left-radius:4px}
+.message.system{align-self:center;background:transparent;color:#5f6368;font-size:13px;text-align:center}
+.message.ai .intent-tag{display:inline-block;font-size:11px;color:#5f6368;background:#e8eaed;padding:1px 8px;border-radius:4px;margin-bottom:4px}
+.typing-dots{display:flex;gap:5px;padding:4px 0}
+.typing-dots span{width:7px;height:7px;background:#9aa0a6;border-radius:50%;animation:bounce 1.4s infinite ease-in-out}
+.typing-dots span:nth-child(2){animation-delay:.2s}
+.typing-dots span:nth-child(3){animation-delay:.4s}
+@keyframes bounce{0%,80%,100%{transform:translateY(0)}40%{transform:translateY(-6px)}}
+.stream-cursor::after{content:"▌";animation:blink .8s step-end infinite;color:#1a73e8}
+@keyframes blink{50%{opacity:0}}
+.input-area{display:flex;gap:8px;padding:12px 20px 16px;border-top:1px solid #e8eaed;flex-shrink:0}
+.input-area input{flex:1;padding:10px 14px;border:1px solid #dadce0;border-radius:24px;font-size:14px;outline:none;transition:border-color .2s}
+.input-area input:focus{border-color:#1a73e8}
+.input-area button{padding:10px 20px;background:#1a73e8;color:#fff;border:none;border-radius:24px;font-size:14px;cursor:pointer;transition:background .2s;white-space:nowrap}
+.input-area button:hover{background:#1557b0}
+.input-area button:disabled{background:#9aa0a6;cursor:not-allowed}
+.clear-btn{position:absolute;top:16px;right:16px;background:none;border:1px solid #dadce0;border-radius:6px;padding:4px 10px;font-size:12px;color:#5f6368;cursor:pointer;display:none}
+.clear-btn:hover{background:#f1f3f4}
+</style>
+</head>
+<body>
+<div class="chat-container">
+  <div class="header">
+    <h1>🏥 医疗咨询 AI</h1>
+    <p>基于 RAG 的智能问答</p>
+    <button class="clear-btn" id="clearBtn" onclick="clearHistory()">清空对话</button>
+  </div>
+  <div class="messages" id="messages"></div>
+  <div class="input-area">
+    <input type="text" id="input" placeholder="请输入您的问题..." autofocus>
+    <button id="sendBtn" onclick="sendMessage()">发送</button>
+  </div>
+</div>
+
+<script>
+const SESSION_KEY = 'medical_chat_session_id';
+let sessionId = localStorage.getItem(SESSION_KEY) || generateId();
+let abortController = null;
+
+function generateId() {
+  return 'session_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+function saveSession() { localStorage.setItem(SESSION_KEY, sessionId); }
+function getSessionId() { saveSession(); return sessionId; }
+
+const messagesEl = document.getElementById('messages');
+const inputEl = document.getElementById('input');
+const sendBtn = document.getElementById('sendBtn');
+const clearBtn = document.getElementById('clearBtn');
+
+inputEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+
+function scrollToBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+
+function addMessage(text, role) {
+  const div = document.createElement('div');
+  div.className = 'message ' + role;
+  div.textContent = text;
+  messagesEl.appendChild(div);
+  scrollToBottom();
+  return div;
+}
+
+function showTyping() {
+  const div = document.createElement('div');
+  div.className = 'message ai';
+  div.id = 'typing-indicator';
+  const dots = document.createElement('div');
+  dots.className = 'typing-dots';
+  for (let i = 0; i < 3; i++) dots.appendChild(document.createElement('span'));
+  div.appendChild(dots);
+  messagesEl.appendChild(div);
+  scrollToBottom();
+}
+
+function removeTyping() {
+  const el = document.getElementById('typing-indicator');
+  if (el) el.remove();
+}
+
+function setLoading(loading) {
+  inputEl.disabled = loading;
+  sendBtn.disabled = loading;
+  inputEl.placeholder = loading ? '等待回复中...' : '请输入您的问题...';
+  if (!loading) inputEl.focus();
+}
+
+/* ------------------------------------------------------------------ */
+/*  核心：Fetch + ReadableStream 消费 SSE 流                          */
+/* ------------------------------------------------------------------ */
+async function sendMessage() {
+  const text = inputEl.value.trim();
+  if (!text) return;
+
+  inputEl.value = '';
+  addMessage(text, 'user');
+  setLoading(true);
+  showTyping();
+
+  abortController = new AbortController();
+
+  try {
+    const res = await fetch('/api/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: text, session_id: getSessionId() }),
+      signal: abortController.signal
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.body) throw new Error('浏览器不支持 ReadableStream');
+
+    removeTyping();
+    clearBtn.style.display = 'inline-block';
+
+    const aiBubble = document.createElement('div');
+    aiBubble.className = 'message ai stream-cursor';
+    messagesEl.appendChild(aiBubble);
+    scrollToBottom();
+
+    let intent = '';
+    let answerText = '';
+    let buffer = '';
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      /* 按 SSE 双换行拆分事件 */
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() || '';
+
+      for (const part of parts) {
+        const lines = part.split('\n');
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const payload = line.slice(6);
+
+          /* 终止信号 */
+          if (payload === '[DONE]') continue;
+
+          try {
+            const data = JSON.parse(payload);
+
+            /* 意图事件 */
+            if (data.intent) {
+              intent = data.intent;
+              /* 为已有 bubble 添加 intent-tag（多轮时首条消息） */
+              if (!aiBubble.querySelector('.intent-tag') && intent && intent !== 'unknown') {
+                const tag = document.createElement('div');
+                tag.className = 'intent-tag';
+                tag.textContent = intent;
+                aiBubble.prepend(tag);
+              }
+              continue;
+            }
+
+            /* 错误事件 */
+            if (data.error) {
+              aiBubble.classList.remove('stream-cursor');
+              aiBubble.textContent = '抱歉，请求出错: ' + data.error;
+              continue;
+            }
+
+            /* 字符事件 — data 为 JSON 字符串 */
+            if (typeof data === 'string') {
+              answerText += data;
+              /* 保留 intent-tag（如果存在），只更新文本部分 */
+              const existingTag = aiBubble.querySelector('.intent-tag');
+              aiBubble.textContent = answerText;
+              if (existingTag) aiBubble.prepend(existingTag);
+              scrollToBottom();
+            }
+          } catch {
+            /* 非 JSON 的 data 行忽略 */
+          }
+        }
+      }
+    }
+
+    aiBubble.classList.remove('stream-cursor');
+
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    removeTyping();
+    addMessage('抱歉，请求出错: ' + err.message, 'system');
+  } finally {
+    setLoading(false);
+    abortController = null;
+  }
+}
+
+function clearHistory() {
+  if (!confirm('确定清空当前对话记录？')) return;
+  if (abortController) { abortController.abort(); abortController = null; }
+  sessionId = generateId();
+  saveSession();
+  messagesEl.innerHTML = '';
+  clearBtn.style.display = 'none';
+  addMessage('对话已清空，开始新会话', 'system');
+}
+
+(function init() {
+  const existing = localStorage.getItem(SESSION_KEY);
+  if (existing) sessionId = existing;
+  addMessage('您好！我是医疗咨询 AI 助手。请描述您的症状或健康问题，我将为您提供参考信息。', 'ai');
+})();
+</script>
+</body>
+</html>

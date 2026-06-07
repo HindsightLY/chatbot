@@ -1,6 +1,12 @@
 """
-日志配置模块
-提供统一的日志记录功能和性能监控装饰器
+日志配置模块 — 基于标准库 logging 的统一日志输出和性能监控
+
+所有模块通过 from src.utils.logger_config import logger 获取日志实例。
+
+功能:
+  - 统一的日志格式（时间、级别、模块名、消息）
+  - 控制台输出（UTF-8 编码）
+  - @monitor_performance 装饰器自动记录函数耗时和异常
 """
 import sys
 import time
@@ -11,46 +17,42 @@ from logging import StreamHandler, Formatter
 
 def setup_logger():
     """
-    设置日志记录器
+    配置根日志记录器（防止重复添加 handler）
 
     Returns:
-        logging.Logger: 配置好的日志记录器
+        命名空间为 "MedicalAI" 的 Logger 实例
     """
-    # 创建一个格式器
     formatter = Formatter(
         fmt='%(asctime)s [%(levelname)s] [%(name)s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-    # 获取根日志记录器
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)  # 设置全局日志级别
+    root_logger.setLevel(logging.INFO)
 
-    # 避免重复添加 Handler (防止日志重复打印)
     if not root_logger.handlers:
-        # 创建控制台处理器
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8')
         handler = StreamHandler(sys.stdout)
         handler.setFormatter(formatter)
         root_logger.addHandler(handler)
 
-    # 返回一个命名空间日志记录器，方便区分来源
     return logging.getLogger("MedicalAI")
 
 
-# 全局实例
 logger = setup_logger()
 
 
 def monitor_performance(func):
     """
-    性能监控装饰器
-    记录函数执行时间并捕获异常
+    函数性能监控装饰器
 
-    Args:
-        func: 被装饰的函数
+    自动记录:
+      - 开始执行
+      - 完成耗时
+      - 异常退出 + 耗时
 
-    Returns:
-        装饰后的函数
+    被 cli_router.run_cli() 使用。
     """
 
     @functools.wraps(func)
