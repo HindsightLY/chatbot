@@ -79,15 +79,16 @@ class MedicalChatbot:
 
 def get_chatbot_agent(agent: MedicalAgent) -> MedicalAgent:
     """
-    获取聊天机器人 Agent 实例的工厂函数
-
-    直接返回传入的 MedicalAgent 对象，用于替代需要 chatbot 实例的场景。
-    路由层应直接使用 system_initializer.agent 而非 system_initializer.chatbot。
+    获取聊天机器人 Agent 实例的工厂函数（已废弃）
 
     Args:
         agent: MedicalAgent 实例
 
     Returns:
         同一个 MedicalAgent 实例
+
+    注意:
+      此函数实质为恒等映射，保留仅用于向后兼容。
+      新代码应直接使用 system_initializer.agent。
     """
     return agent

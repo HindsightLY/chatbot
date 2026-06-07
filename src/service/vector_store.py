@@ -1,15 +1,19 @@
 """
 向量存储管理模块 — ChromaDB 创建、加载、混合检索、重排序
 
-检索流水线（由 APP_CONFIG 控制各阶段开关）:
-  1. 混合检索 (Hybrid Search)
-     ├─ 稠密检索: ChromaDB 余弦相似度 (Top-N, N = hybrid_prefetch_k)
-     └─ 稀疏检索: BM25 关键词匹配 (jieba 分词 + BM25Okapi, Top-N)
-     └─ RRF 融合: Reciprocal Rank Fusion 合并排序（分别计算稠密和稀疏的贡献）
-  2. Cross-Encoder 重排序 (可选)
-     └─ cross-encoder/ms-marco-MiniLM-L-6-v2 对 (query, doc) 对逐一打分
+混合检索流水线（各阶段可由 APP_CONFIG 独立开关）:
+  1. 稠密检索: ChromaDB 余弦相似度（Top-N，N = hybrid_prefetch_k）
+  2. 稀疏检索: BM25 关键词匹配（jieba 分词 + BM25Okapi，Top-N）
+  3. RRF 融合: Reciprocal Rank Fusion 合并稠密和稀疏排序结果
+  4. Cross-Encoder 重排序（可选）: cross-encoder/ms-marco-MiniLM-L-6-v2 逐对打分
 
-被 system_initializer.py 调用，结果通过 system_initializer.vector_store 暴露给 agent.py。
+外部依赖:
+  - ChromaDB（持久化向量库）
+  - OllamaEmbeddings（文本转向量）
+  - jieba（中文分词）
+  - sentence-transformers（可选，重排序用）
+
+被 system_initializer.py 调用，通过 system_initializer.vector_store 暴露给 agent.py。
 """
 import os
 import jieba
@@ -142,14 +146,17 @@ class VectorStoreManager:
         """
         构建 BM25 倒排索引
 
-        使用 jieba 中文分词对每个文档做 tokenization，
-        然后创建 BM25Okapi 实例。
+        使用 jieba 中文分词后创建 BM25Okapi 实例。
+        优先使用传入的 Document 列表（create 时），否则从已加载的 ChromaDB 集合中读取。
 
-        优先使用传入的 Document 列表（create 时），
-        否则从已加载的 ChromaDB 集合中读取全部文档。
+        Args:
+            documents: 可选的 Document 列表，不传则从已加载的 ChromaDB 读取
         """
         try:
-            if documents is None:
+            if documents is not None:
+                raw_texts = [d.page_content for d in documents]
+                metadatas = [d.metadata for d in documents]
+            else:
                 if not self._vector_store:
                     logger.warning("⚠️ ChromaDB 未加载，无法构建 BM25 索引")
                     return
@@ -159,9 +166,6 @@ class VectorStoreManager:
                     return
                 raw_texts = all_data["documents"]
                 metadatas = all_data["metadatas"]
-            else:
-                raw_texts = [d.page_content for d in documents]
-                metadatas = [d.metadata for d in documents]
 
             tokenized_corpus = []
             self._bm25_docs = []
@@ -297,6 +301,7 @@ class VectorStoreManager:
 
         # ── Step 2: BM25 稀疏检索 ──
         self._ensure_bm25()
+        bm25_rank_map = {}
         if self._bm25_index and self._bm25_docs:
             try:
                 query_tokens = list(jieba.cut(query))
@@ -310,6 +315,7 @@ class VectorStoreManager:
 
                 for rank, idx in enumerate(bm25_ranked):
                     doc_id, text, meta = self._bm25_docs[idx]
+                    bm25_rank_map[doc_id] = rank           # 保存实际排序位置，用于后续 RRF
                     if doc_id not in seen_ids:
                         # BM25 独有文档：dense_rank = None 避免 RRF 重复计分
                         bm25_doc = Document(page_content=text, metadata=meta)
@@ -327,10 +333,9 @@ class VectorStoreManager:
             logger.warning("⚠️ 检索结果为空")
             return []
 
-        # ── Step 3: RRF 融合（带 bm25_rank 缓存，优化 O(n²) 查找） ──
+        # ── Step 3: RRF 融合 ──
         rrf_k_const = APP_CONFIG.rrf_k
-        # 构建 doc_id → bm25_rank 的哈希表缓存，避免逐文档遍历 _bm25_docs
-        bm25_rank_map = {did: i for i, (did, _, _) in enumerate(self._bm25_docs)} if self._bm25_docs else {}
+        # bm25_rank_map 已在 BM25 检索中构建（doc_id → 实际 BM25 排序位置）
 
         scored_docs = []
         for doc_id, (doc, dense_score, bm25_score, dense_rank) in all_docs_dict.items():

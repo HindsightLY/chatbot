@@ -137,17 +137,17 @@ class MemorySummarizer:
             "turn_count": len(messages)
         }
 
-        rc = self.memory_store.client if hasattr(self.memory_store, 'client') else None
-        if rc:
-            try:
-                key = self._summary_key(session_id)
-                rc.rpush(key, json.dumps(summary_entry, ensure_ascii=False))
-                rc.expire(key, APP_CONFIG.redis_ttl)
-                logger.info(f"✅ 摘要已存储，session_id={session_id}")
-            except Exception as e:
-                logger.warning(f"⚠️ 摘要存储失败: {e}")
-        else:
+        rc = self.memory_store.client
+        if not rc:
             logger.warning("⚠️ Redis 不可用，摘要未持久化")
+            return
+        try:
+            key = self._summary_key(session_id)
+            rc.rpush(key, json.dumps(summary_entry, ensure_ascii=False))
+            rc.expire(key, APP_CONFIG.redis_ttl)
+            logger.info(f"✅ 摘要已存储，session_id={session_id}")
+        except Exception as e:
+            logger.warning(f"⚠️ 摘要存储失败: {e}")
 
     def get_all_summaries(self, session_id: str) -> List[Dict]:
         """
@@ -156,15 +156,16 @@ class MemorySummarizer:
         Returns:
             [{"summary": str, "start_time": str, "end_time": str, "turn_count": int}, ...]
         """
-        rc = self.memory_store.client if hasattr(self.memory_store, 'client') else None
-        if rc:
-            try:
-                key = self._summary_key(session_id)
-                raw_list = rc.lrange(key, 0, -1)
-                return [json.loads(item) for item in raw_list]
-            except Exception as e:
-                logger.warning(f"⚠️ 读取摘要失败: {e}")
-        return []
+        rc = self.memory_store.client
+        if not rc:
+            return []
+        try:
+            key = self._summary_key(session_id)
+            raw_list = rc.lrange(key, 0, -1)
+            return [json.loads(item) for item in raw_list]
+        except Exception as e:
+            logger.warning(f"⚠️ 读取摘要失败: {e}")
+            return []
 
     # ────────── 语义检索 ──────────
 
@@ -280,14 +281,15 @@ class MemorySummarizer:
         oldest_messages = messages[:threshold]
         self.store_summary(session_id, oldest_messages)
 
-        rc = self.memory_store.client if hasattr(self.memory_store, 'client') else None
-        if rc:
-            try:
-                key = f"chat:{session_id}:messages"
-                rc.ltrim(key, len(oldest_messages), -1)
-                logger.info(f"🗑️ 已清理 {len(oldest_messages)} 条旧消息，移至摘要")
-            except Exception as e:
-                logger.warning(f"⚠️ 清理旧消息失败: {e}")
+        rc = self.memory_store.client
+        if not rc:
+            return
+        try:
+            key = f"chat:{session_id}:messages"
+            rc.ltrim(key, len(oldest_messages), -1)
+            logger.info(f"🗑️ 已清理 {len(oldest_messages)} 条旧消息，移至摘要")
+        except Exception as e:
+            logger.warning(f"⚠️ 清理旧消息失败: {e}")
 
 
 memory_summarizer = None

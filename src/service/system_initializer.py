@@ -48,10 +48,12 @@ class SystemInitializer:
 
     def initialize_system(self) -> Tuple[object, object, object]:
         """
-        按依赖顺序初始化所有组件。
+        按依赖顺序初始化所有核心组件。
 
-        每个组件初始化独立 try/except，单组件失败不影响其他组件。
-        初始化前先检查 Ollama 服务是否可达（仅记录，不阻塞）。
+        容错策略:
+          - 每个组件初始化独立 try/except，单组件失败不影响其他组件
+          - Ollama/Redis 不可用时记录警告，系统以降级模式运行
+          - 初始化前先检查 Ollama 服务是否可达（仅记录，不阻塞后续初始化）
 
         Returns:
             (vector_store, intent_classifier, agent) 三个核心组件引用
@@ -149,7 +151,7 @@ class SystemInitializer:
         容错:
           - Redis 连接失败时记录警告，返回无连接的 MemoryStore 实例
           - 后续所有读写操作静默返回空结果，不影响主流程
-          - 通过 MemoryStore.__new__ 创建空实例，避免调用方做 None 检查
+          - 即使 Redis 不可用也返回 MemoryStore 实例，避免调用方做 None 检查
         """
         logger.info("💾 初始化 Redis 对话记忆...")
         try:

@@ -6,10 +6,13 @@
   python main.py         → CLI 交互界面
 
 启动流程:
-  1. 设置 HuggingFace 国内镜像 + 强制离线（环境变量优先于模型下载）
+  1. 设置 HuggingFace 国内镜像 + 强制使用本地缓存（环境变量优先于模型下载）
   2. 确保 data/disease/chroma_db 目录存在
   3. API 模式: FastAPI + uvicorn → startup 事件初始化系统 → 浏览器自动打开
   4. CLI 模式: run_cli() 直接触发初始化
+
+组件架构:
+  LangGraph 智能体 + ChromaDB 向量检索 + Redis 对话记忆 + Ollama LLM
 """
 import sys
 import os
@@ -17,7 +20,6 @@ import os
 # 强制 HuggingFace 从镜像加载并使用本地缓存（不联网）
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 os.environ["HF_HUB_OFFLINE"] = "1"
-import asyncio
 import webbrowser
 import threading
 import uvicorn
@@ -97,15 +99,6 @@ if __name__ == "__main__":
 
     if args.api:
         threading.Thread(target=open_browser, args=(args.host, args.port), daemon=True).start()
-        config = uvicorn.Config(app, host=args.host, port=args.port, lifespan="on")
-        server = uvicorn.Server(config)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(server.serve())
-        except KeyboardInterrupt:
-            pass
-        finally:
-            loop.close()
+        uvicorn.run(app, host=args.host, port=args.port, lifespan="on")
     else:
         run_cli()

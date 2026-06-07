@@ -119,14 +119,13 @@ async def api_chat_stream(request: ChatRequest):
     SSE 流式问答接口
 
     使用 Server-Sent Events 协议逐 token 推送 LLM 生成结果。
-    同步 Generator 通过 loop.run_in_executor() 转换为异步迭代。
+    同步 Generator 通过 loop.run_in_executor() 转换为异步迭代，避免阻塞事件循环。
 
     SSE 事件序列:
-      1. data: {"intent":"medical_inquiry"}
-      2. data: "token1"
-      3. data: "token2"
+      1. data: {"intent":"medical_inquiry"}     — 意图事件（首个）
+      2. data: "逐 token 内容"                   — LLM 输出片段
       ...
-      N. data: [DONE]
+      N. data: [DONE]                           — 终止信号
 
     Args:
         request: ChatRequest {query, session_id}

@@ -41,13 +41,13 @@ class ToolManager:
 
     def extract_city_by_llm(self, query: str) -> Optional[str]:
         """
-        两阶段城市提取中的 LLM 兜底。
+        LLM 兜底提取城市名（两阶段提取的第二阶段）。
 
-        当 text_utils.extract_city_from_text 的正则+列表匹配失败后，
-        用 LLM 做语义理解提取城市名。输出后过滤常见无效词防止幻觉。
+        当正则+城市列表匹配失败后，用 LLM 做语义理解提取城市名。
+        输出后过滤常见无效词（如"未找到""没有"等）防止模型幻觉。
 
         Returns:
-            城市名，或 None（未识别）
+            城市名，或 None（未识别到有效城市）
         """
         extraction_prompt = f"""
         请从以下句子中提取出城市名称。只返回城市名称，不要有任何其他文字。

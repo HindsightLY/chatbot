@@ -1,9 +1,11 @@
 """
 天气查询工具 — 高德地图天气 API 封装
 
-被 tool_manager.py 的 get_weather_response() 调用:
-  extract_city_from_text()  →  search_weather()  →  LLM 润色
-  extract_city_by_llm()    ↗
+调用链:
+  tool_manager.get_weather_response()
+    → extract_city_from_text() 或 extract_city_by_llm() 提取城市
+    → search_weather() 调用高德 API
+    → LLM 将结构化数据润色为自然语言
 
 API: 高德地图 Web 服务 — 天气查询（实时）
 """

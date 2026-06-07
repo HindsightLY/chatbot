@@ -6,7 +6,8 @@ LangChain 工具集 — 供 Agent 的 bind_tools() + ToolNode 调用
   get_weather               — 天气查询（高德 API）
   chat_general              — 通用闲聊兜底（Ollama LLM）
 
-延迟导入: 通过 _get_vector_store / _get_llm 避免循环导入
+设计说明:
+  通过 _get_vector_store / _get_llm 延迟获取实例，避免与 system_initializer 循环导入。
 """
 from langchain_core.tools import tool
 from config.app_config import APP_CONFIG

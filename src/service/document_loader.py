@@ -1,5 +1,5 @@
 """
-文档加载模块 — 从 data/disease/ 读取并分块
+文档加载与分块模块 — 从 data/disease/ 读取医学文档并分块
 
 分块策略（二选一，由 APP_CONFIG.use_semantic_chunking 控制）:
   - 语义分块（默认）: 句子级拆分 → 向量化 → 按余弦距离间隙合并，自动保持话题内聚
@@ -7,6 +7,7 @@
 
 调用链:
   system_initializer → DocumentLoader.load_and_split_documents()
+    → SemanticChunker.split_documents() 或 RecursiveCharacterTextSplitter
     → VectorStoreManager.create_vector_store()
 """
 import os
@@ -250,21 +251,20 @@ class DocumentLoader:
         对 Document 列表执行分块。
 
         策略选择:
-          - APP_CONFIG.use_semantic_chunking = True  → SemanticChunker（语义分块）
-          - False                                    → RecursiveCharacterTextSplitter（固定分块）
+          - APP_CONFIG.use_semantic_chunking = True → SemanticChunker（语义分块）
+          - False → RecursiveCharacterTextSplitter（固定分块）
 
         Args:
             documents: 原始 Document 列表
 
         Returns:
-            分块后的 Document 列表
+            分块后的 Document 列表，每块含 chunk_index/total_chunks/chunk_size/chunk_method
         """
         if not documents:
             return []
 
         if APP_CONFIG.use_semantic_chunking:
-            chunker = SemanticChunker()
-            return chunker.split_documents(documents)
+            return SemanticChunker().split_documents(documents)
 
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=APP_CONFIG.chunk_size,
@@ -276,7 +276,7 @@ class DocumentLoader:
         for doc in documents:
             chunks = splitter.split_text(doc.page_content)
             for i, chunk in enumerate(chunks):
-                split_doc = Document(
+                split_docs.append(Document(
                     page_content=chunk,
                     metadata={
                         **doc.metadata,
@@ -285,8 +285,7 @@ class DocumentLoader:
                         'chunk_size': len(chunk),
                         'chunk_method': 'fixed'
                     }
-                )
-                split_docs.append(split_doc)
+                ))
 
         logger.info(f"✂️ 固定分块完成，总共 {len(split_docs)} 个块")
         return split_docs

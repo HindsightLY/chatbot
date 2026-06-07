@@ -132,7 +132,7 @@ class MedicalAgent:
         self.graph = self._build_graph()
 
     # ══════════════════════════════════════════
-    #  图节点函数 — 每个函数对应 StateGraph 的一个节点
+    #  图节点 — 每个函数对应 StateGraph 的一个节点
     # ══════════════════════════════════════════
 
     def _classify_intent(self, state: AgentState) -> AgentState:
@@ -235,12 +235,7 @@ class MedicalAgent:
                 last_user_msg = content
                 break
 
-        self.memory_store.add_message(state["session_id"], "user", last_user_msg)
-        self.memory_store.add_message(state["session_id"], "assistant", state.get("answer", ""))
-
-        if self.memory_summarizer:
-            self.memory_summarizer.check_and_summarize(state["session_id"])
-
+        self._persist_memory(state["session_id"], last_user_msg, state.get("answer", ""))
         return {**state, "human_approved": True}
 
     # ══════════════════════════════════════════
@@ -251,7 +246,7 @@ class MedicalAgent:
         """
         构建 LangGraph 状态图
 
-        节点流：classify_intent → call_model
+        节点流: classify_intent → call_model
           ├─ _route_after_model="continue" → tool_node → call_model（循环）
           └─ _route_after_model="end" → human_review（interrupt）→ save_memory → END
         """
@@ -449,7 +444,7 @@ class MedicalAgent:
                 yield event
 
             # === 步骤 3: 记忆持久化 ===
-            self._save_memory_stream(session_id, user_input, full_answer)
+            self._persist_memory(session_id, user_input, full_answer)
 
             logger.info(f"💡 流式生成完成，长度: {len(full_answer)}")
             yield {"type": "done"}
@@ -464,8 +459,8 @@ class MedicalAgent:
             yield {"type": "token", "content": msg}
             yield {"type": "done"}
 
-    def _save_memory_stream(self, session_id: str, user_input: str, answer: str):
-        """流式模式下的记忆持久化（与同步图 _save_memory 共享核心逻辑）"""
+    def _persist_memory(self, session_id: str, user_input: str, answer: str):
+        """统一记忆持久化入口（同步图和流式路径共用）"""
         self.memory_store.add_message(session_id, "user", user_input)
         self.memory_store.add_message(session_id, "assistant", answer)
         if self.memory_summarizer:

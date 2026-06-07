@@ -4,17 +4,16 @@ CLI 路由器 — 命令行交互界面
 与 chat_router.py 共享同一套意图路由逻辑（通过 system_initializer.agent）。
 
 流程:
-  1. run_cli() 检查 system_initializer.agent 是否为 None
-  2. 如果为 None，调用 system_initializer.initialize_system()
-  3. 进入 while True 循环，逐行读取用户输入
-  4. 每轮调用 agent.run_stream()，逐事件处理 intent / token / done
-  5. 'quit' 或 'exit' 退出
+  1. 启动时检查 agent 是否已初始化，未初始化则调用 initialize_system()
+  2. 进入 while True 循环，逐行读取用户输入
+  3. 每轮调用 agent.run_stream()，逐事件处理 intent → token → done
+  4. 输入 quit 或 exit 退出
 
 注意事项:
-  - run_stream 流式路径不再产生 review 事件，记忆在 agent 内部自动保存
-  - 所有事件由 agent 内部统一完成意图分类 + 检索 + 生成 + 保存，无需外部干预
+  - run_stream 流式路径在 agent 内部自动完成意图分类 + 检索 + 生成 + 记忆持久化
+  - 不再产生 review 事件，无需外部接管
 
-被 main.py 调用:
+调用方式:
   python main.py         → CLI 模式（默认）
   python main.py --api   → API 模式
 """

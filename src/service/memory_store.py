@@ -2,11 +2,11 @@
 Redis 对话记忆模块 — 按 session_id 存储/读取对话历史
 
 存储结构:
-  key:  chat:{session_id}:messages (Redis List)
-  value: {"role": "user"|"assistant", "content": str, "timestamp": str}  (JSON)
+  key:  chat:{session_id}:messages（Redis List）
+  value: {"role": "user"|"assistant", "content": str, "timestamp": str}（JSON）
 
-过期策略: 每次 rpush 后重新 expire，TTL 来自 APP_CONFIG.redis_ttl（默认 86400s）
-回退策略: Redis 不可用时静默降级（client 返回 None），不影响主流程
+过期策略: 每次 rpush 后重新设置 TTL（默认 86400 秒，约 24 小时）
+回退策略: Redis 不可用时 client 返回 None，后续读写静默跳过，不影响主业务流程
 """
 import json
 from datetime import datetime

@@ -42,6 +42,8 @@ INTENT_EXAMPLES = {
     ],
 }
 
+# 各意图的示例问句向量已预编码，推理时直接做矩阵乘法，无需重复编码示例
+
 
 class BertIntentClassifier:
     """
@@ -64,10 +66,10 @@ class BertIntentClassifier:
 
     def _load_model(self):
         """
-        加载 sentence-transformer 模型并预编码所有意图示例。
+        加载 sentence-transformer 模型并预编码所有意图示例向量。
 
-        预编码后的嵌入存入 self.intent_embeddings，推理时直接计算
-        query_emb @ examples_emb.T 矩阵乘法，无需重复编码示例。
+        预编码后的嵌入存入 self.intent_embeddings，推理时只需计算
+        query_emb @ examples_emb.T 矩阵乘法即可获得所有意图得分，无需重复编码示例。
         """
         try:
             from sentence_transformers import SentenceTransformer

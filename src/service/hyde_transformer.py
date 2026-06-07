@@ -1,18 +1,17 @@
 """
-HyDE (Hypothetical Document Embeddings) 查询转换模块
+HyDE（假设文档嵌入）查询转换模块
 
-原理: 先用 LLM 生成一个假设性的"理想回答文档"，
-再用该文档的嵌入向量替代原始查询进行稠密检索。
-假设文档与知识库中的真实文档在语义空间上更接近，
-从而提升召回质量。
+原理:
+  先用 LLM 生成一段假设性的"理想回答文档"，再用该文档的嵌入向量替代原始查询进行稠密检索。
+  假设文档与知识库中的真实文档在语义空间上更接近，从而提升召回质量。
 
 适用场景:
-  - medical_inquiry 意图的稠密检索 (ChromaDB 余弦相似度)
-  - BM25 稀疏检索仍使用原始查询（基于关键词，不受益于 HyDE）
+  - medical_inquiry 意图的稠密检索（ChromaDB 余弦相似度）
+  - BM25 稀疏检索仍使用原始查询（基于关键词匹配，不受益于 HyDE）
 
-配置:
-  - use_hyde: 是否启用 HyDE (config/app_config.py)
-  - hyde_prompt_template: 生成假设文档的 Prompt
+配置项:
+  - use_hyde: 是否启用 HyDE（config/app_config.py）
+  - hyde_temperature: 生成假设文档时的温度参数
 """
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage

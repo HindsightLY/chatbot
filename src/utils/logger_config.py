@@ -1,8 +1,12 @@
 """
-日志配置模块
-使用标准库 logging 提供统一的日志输出和性能监控
+日志配置模块 — 基于标准库 logging 的统一日志输出和性能监控
 
 所有模块通过 from src.utils.logger_config import logger 获取日志实例。
+
+功能:
+  - 统一的日志格式（时间、级别、模块名、消息）
+  - 控制台输出（UTF-8 编码）
+  - @monitor_performance 装饰器自动记录函数耗时和异常
 """
 import sys
 import time

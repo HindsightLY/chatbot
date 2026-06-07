@@ -40,7 +40,7 @@ class IntentClassifier:
             except Exception as e:
                 logger.warning(f"⚠️ BERT 分类器实例化失败: {e}")
 
-        # LLM 分类用的意图 Schema（描述 + 关键词辅助语义理解）
+        # LLM 分类用的意图定义（描述 + 关键词辅助语义理解）
         self.intent_schema = {
             "intents": [
                 {
@@ -65,10 +65,10 @@ class IntentClassifier:
 
     def _keyword_classify(self, query: str) -> str:
         """
-        关键词规则分类（最轻量兜底，~1ms）
+        关键词规则分类（最轻量兜底，耗时约 1ms）
 
         对 query 逐词匹配预定义关键词列表，按命中数与阈值判定。
-        medical 和 system 需要 ≥2 个命中避免误判，weather 仅需 ≥1 个。
+        医疗和系统类需要 ≥2 个命中避免误判，天气类仅需 ≥1 个命中。
         """
         q = query.lower()
         medical_kw = ["病", "症状", "药", "怎么治", "原因", "医生", "医院",
@@ -155,7 +155,7 @@ class IntentClassifier:
         except Exception as e:
             logger.info(f"LLM 分类失败: {e}")
 
-        # ── 引擎 3: 关键词规则兜底 ──
+        # ── 引擎 3: 关键词规则兜底（确保极端情况下仍有合理结果） ──
         result = self._keyword_classify(query)
         logger.debug(f"关键词兜底分类: {result}")
         return result

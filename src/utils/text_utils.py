@@ -21,7 +21,7 @@ def extract_city_from_text(text: str) -> Optional[str]:
 
     列表匹配: 逐 city 检查是否出现在 text 中。
 
-    Note: 这是快速路径，失败后由 tool_manager.extract_city_by_llm() LLM 兜底。
+    注意: 这是快速路径（正则+城市列表匹配），失败后由 LLM 兜底提取。
 
     Args:
         text: 用户输入文本
